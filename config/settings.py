@@ -34,6 +34,9 @@ class Settings:
     LAMPORT_PER_SOL = 1_000_000_000
     UNITS_PER_USDC = 1_000_000
 
+    # 每次交易的USDC数量
+    AMOUNT_USDC = 100
+
     # --- ⚡️ 成本与风控配置 (你的核心要求) ---
     # 1. 假定 SOL 价格 (用于快速计算 Gas 和 小费成本)
     # 设为 1000U 是一个保守策略：如果按 1000U 算都能覆盖成本，实际肯定赚

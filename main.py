@@ -46,8 +46,8 @@ async def main():
     jup_client = JupiterClient()
     jito_client = JitoClient()
 
-    # 3. 设定投入金额 (100 USDC)
-    amount_usdc = 100
+    # 3. 设定投入金额
+    amount_usdc = settings.AMOUNT_USDC
     amount_lamports = int(amount_usdc * settings.UNITS_PER_USDC)
 
     logger.info(f"💵 每次投入: {amount_usdc} USDC")
@@ -70,7 +70,12 @@ async def main():
             # 检查净利润是否满足最低要求
             net_profit = arb_result['net_profit_usdc']
             gross_profit = arb_result['gross_profit_usdc']
+            
+            # 调试日志：显示详细的利润信息
+            logger.debug(f"📊 利润分析: 净利润=${net_profit:.6f}, 最低要求=${settings.MIN_NET_PROFIT_USDC:.6f}")
+            logger.debug(f"   判断条件: net_profit > MIN_NET_PROFIT_USDC => {net_profit:.6f} > {settings.MIN_NET_PROFIT_USDC:.6f} = {net_profit > settings.MIN_NET_PROFIT_USDC}")
 
+            # 关键：只有净利润大于最低要求时才执行套利（确保不会亏损）
             if net_profit > settings.MIN_NET_PROFIT_USDC:
                 logger.warning(f"🔥 发现套利机会! 净利润: ${net_profit:.4f} USDC (毛利: ${gross_profit:.4f} USDC)")
                 
