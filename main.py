@@ -57,46 +57,67 @@ async def main():
     # --- 死循环：开始持续巡逻 ---
     while True:
         try:
-            logger.info("🔎 正在扫描闭环套利机会 (USDC -> ... -> USDC)...")
+            logger.info("🔎 正在扫描闭环套利机会 (USDC -> SOL -> USDC)...")
 
-            # ✅ 修改 1: 路径改为 USDC 进，USDC 出
-            quote = await jup_client.get_quote(
-                settings.USDC_MINT,
-                settings.USDC_MINT,  # 目标也是 USDC，寻找环形价差
-                amount_lamports
-            )
+            # 使用check_arb_opportunity方法检查套利机会
+            arb_result = await jup_client.check_arb_opportunity(amount_lamports)
 
-            if not quote:
+            if not arb_result:
+                # 未发现套利机会或询价失败，等待后继续
                 await asyncio.sleep(3)
                 continue
 
-            # ✅ 修改 2: 真实利润计算 (不再模拟)
-            out_amount = int(quote['outAmount'])
-            gross_profit_usdc = (out_amount - amount_lamports) / settings.UNITS_PER_USDC
-
-            # 成本计算 (Gas + Jito Tip)
-            total_cost_usdc = (
-                                          settings.JITO_TIP_AMOUNT_SOL + settings.ESTIMATED_GAS_SOL) * settings.FIXED_SOL_PRICE_USDC
-            net_profit = gross_profit_usdc - total_cost_usdc
-
-            logger.info(f"📊 净利估算: ${net_profit:.4f} (毛利: ${gross_profit_usdc:.4f})")
+            # 检查净利润是否满足最低要求
+            net_profit = arb_result['net_profit_usdc']
+            gross_profit = arb_result['gross_profit_usdc']
 
             if net_profit > settings.MIN_NET_PROFIT_USDC:
-                logger.warning(f"🔥 发现真实利润 ${net_profit:.4f}! 立即开火!")
+                logger.warning(f"🔥 发现套利机会! 净利润: ${net_profit:.4f} USDC (毛利: ${gross_profit:.4f} USDC)")
+                
+                # 执行原子套利：构建包含两个swap的原子bundle
+                logger.info("📦 构建原子套利交易bundle (USDC->SOL->USDC)...")
+                
+                # 关键：为了确保原子性，我们需要快速连续获取两个swap交易
+                # 这样它们会使用相同或非常接近的blockhash
+                # 1. 获取第一个swap交易 (USDC -> SOL)
+                swap_buy_resp = await jup_client.get_swap_tx(arb_result['quote_buy'])
+                if not swap_buy_resp:
+                    logger.error("❌ 获取第一个swap交易失败 (USDC -> SOL)")
+                    await asyncio.sleep(3)
+                    continue
 
-                swap_resp = await jup_client.get_swap_tx(quote)
-                if not swap_resp: continue
+                # 2. 立即获取第二个swap交易 (SOL -> USDC)
+                # 注意：第二个swap使用第一个swap的输出数量，确保闭环
+                swap_sell_resp = await jup_client.get_swap_tx(arb_result['quote_sell'])
+                if not swap_sell_resp:
+                    logger.error("❌ 获取第二个swap交易失败 (SOL -> USDC)")
+                    await asyncio.sleep(3)
+                    continue
 
-                res = await jito_client.send_bundle(swap_resp['swapTransaction'], settings.KEYPAIR)
+                # 3. 将两个swap交易打包成原子bundle并发送
+                # 关键：两个swap在同一个bundle中，要么全部成功，要么全部失败
+                # Bundle执行顺序：swap1 (USDC->SOL) -> swap2 (SOL->USDC) -> tip
+                # Jito Bundle的原子性保证：如果任何一个swap失败，整个bundle都会回滚
+                logger.info("🔒 打包原子bundle，确保零风险套利...")
+                res = await jito_client.send_bundle(
+                    swap_buy_resp['swapTransaction'],  # 第一个swap
+                    settings.KEYPAIR,
+                    additional_txs=[swap_sell_resp['swapTransaction']]  # 第二个swap，确保原子执行
+                )
 
                 if res == "RATE_LIMITED":
                     logger.info("⏳ 触发限流，进入 30 秒冷却期...")
                     await asyncio.sleep(30)
                 elif res:
-                    logger.success(f"🎉 套利 Bundle 已提交! ID: {res}")
+                    logger.success(f"🎉 原子套利Bundle已提交! Bundle ID: {res}")
+                    logger.info("✅ 两个swap将在同一区块中原子执行，零风险套利!")
                     await asyncio.sleep(10)  # 成功后等待上链
+                else:
+                    logger.error("❌ Bundle提交失败")
+                    await asyncio.sleep(5)
             else:
-                # ✅ 修改 3: 动态增加 CD 时间，彻底避开 429
+                # 利润不足，继续扫描
+                logger.info(f"📉 利润不足，继续扫描... (净利润: ${net_profit:.4f} < ${settings.MIN_NET_PROFIT_USDC})")
                 await asyncio.sleep(5)
 
         except Exception as e:
