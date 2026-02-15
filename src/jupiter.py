@@ -9,7 +9,8 @@ class JupiterClient:
     def __init__(self):
         self.api_url = settings.JUPITER_QUOTE_API
 
-    def _get_headers(self):
+    @staticmethod
+    def _get_headers():
         headers = {
             "Accept": "application/json"
         }
@@ -46,6 +47,34 @@ class JupiterClient:
             except Exception as e:
                 logger.error(f"❌ 网络请求异常: {e}")
                 return None
+
+    async def get_swap_tx(self, quote_response):
+        """
+        拿着 Quote 结果，去换取 Transaction 数据
+        """
+        payload = {
+            "quoteResponse": quote_response,
+            "userPublicKey": str(settings.PUB_KEY),
+            "wrapAndUnwrapSol": True,
+            # 关键点：Jito 模式下这里设为 0 或 auto，因为我们会单独付小费
+            # 如果不走 Jito，这里要设很高才能抢到
+            "computeUnitPriceMicroLamports": 0
+        }
+
+        async with aiohttp.ClientSession() as session:
+            try:
+                async with session.post(
+                        settings.JUPITER_SWAP_API,
+                        json=payload,
+                        headers=self._get_headers()
+                ) as resp:
+                    if resp.status != 200:
+                        logger.error(f"❌ Swap API 报错: {await resp.text()}")
+                        return None
+                    return await resp.json()
+            except Exception as e:
+                logger.error(f"❌ Swap 请求异常: {e}")
+        return None
 
     async def check_arb_opportunity(self, invest_amount_usdc_units):
         """
