@@ -57,86 +57,51 @@ async def main():
     # --- 死循环：开始持续巡逻 ---
     while True:
         try:
-            start_time = time.time()
+            logger.info("🔎 正在扫描闭环套利机会 (USDC -> ... -> USDC)...")
 
-            # A. 询价 (USDC -> SOL -> USDC)
-            # 这里简化逻辑，先做第一腿询价演示，实际套利需要更复杂的路径搜索
-            # 暂时我们先测试 "能否跑通整个交易流程"
-
-            # 注意：真实的套利通常是找特定代币，这里为了演示 Jito 上链，
-            # 我们模拟一个 "USDC -> SOL" 的单边买入，或者你可以换成其他你认为有价差的币
-            # 为了安全起见，我们先不做自动循环买卖，而是 "运行一次测试"
-            # 如果你想做循环监控，就把下面的 break 去掉
-
-            logger.info("🔎 正在询价...")
-
-            # --- 模拟：获取 USDC -> SOL 的报价 ---
+            # ✅ 修改 1: 路径改为 USDC 进，USDC 出
             quote = await jup_client.get_quote(
                 settings.USDC_MINT,
-                settings.SOL_MINT,
+                settings.USDC_MINT,  # 目标也是 USDC，寻找环形价差
                 amount_lamports
             )
 
             if not quote:
-                await asyncio.sleep(1)
+                await asyncio.sleep(3)
                 continue
 
-            # B. 算账 (核心逻辑)
-            out_amount_lamports = int(quote['outAmount'])
+            # ✅ 修改 2: 真实利润计算 (不再模拟)
+            out_amount = int(quote['outAmount'])
+            gross_profit_usdc = (out_amount - amount_lamports) / settings.UNITS_PER_USDC
 
-            # 把 SOL 换算回 USDC 价值 (基于我们的 1000U 假设)
-            # 实际套利中，这里应该是第二腿 (SOL -> USDC) 的询价结果
-            # 但为了演示 Jito 发送，我们假设这就是最终结果
+            # 成本计算 (Gas + Jito Tip)
+            total_cost_usdc = (
+                                          settings.JITO_TIP_AMOUNT_SOL + settings.ESTIMATED_GAS_SOL) * settings.FIXED_SOL_PRICE_USDC
+            net_profit = gross_profit_usdc - total_cost_usdc
 
-            # 假设：我们通过某种神操作，这一单能赚 0.5 USDC (这里强行模拟一个利润，为了触发交易)
-            # 在真实代码里，这里应该是: estimated_profit = final_usdc - input_usdc
-            estimated_profit_usdc = 0.5  # <--- 强行模拟利润，测试 Jito 是否工作！
+            logger.info(f"📊 净利估算: ${net_profit:.4f} (毛利: ${gross_profit_usdc:.4f})")
 
-            # C. 计算成本 (USDC)
-            # 成本 = (Jito小费 + Gas费) * SOL价格
-            total_cost_sol = settings.JITO_TIP_AMOUNT_SOL + settings.ESTIMATED_GAS_SOL
-            total_cost_usdc = total_cost_sol * settings.FIXED_SOL_PRICE_USDC
-
-            net_profit = estimated_profit_usdc - total_cost_usdc
-
-            logger.info(f"📊 财务分析:")
-            logger.info(f"   预期毛利: ${estimated_profit_usdc:.4f}")
-            logger.info(f"   预估成本: ${total_cost_usdc:.4f} (Tip: {settings.JITO_TIP_AMOUNT_SOL} SOL)")
-            logger.info(f"   预期净利: ${net_profit:.4f}")
-
-            # D. 决策开火
             if net_profit > settings.MIN_NET_PROFIT_USDC:
-                logger.warning("🔥 发现利润！准备开火！")
+                logger.warning(f"🔥 发现真实利润 ${net_profit:.4f}! 立即开火!")
 
-                # 1. 获取交易数据
                 swap_resp = await jup_client.get_swap_tx(quote)
                 if not swap_resp: continue
 
-                tx_base64 = swap_resp['swapTransaction']
+                res = await jito_client.send_bundle(swap_resp['swapTransaction'], settings.KEYPAIR)
 
-                # 2. 发送 Jito Bundle
-                bundle_id = await jito_client.send_bundle(tx_base64, settings.KEYPAIR)
-
-                if bundle_id:
-                    logger.success(f"🎉 交易已提交! Bundle ID: {bundle_id}")
-                    # 真实跑的时候，这里可以 break 或者 sleep 此时
-                    break
-
-                # 成功开火后，多睡一会儿，等待链上确认
-                await asyncio.sleep(10)
+                if res == "RATE_LIMITED":
+                    logger.info("⏳ 触发限流，进入 30 秒冷却期...")
+                    await asyncio.sleep(30)
+                elif res:
+                    logger.success(f"🎉 套利 Bundle 已提交! ID: {res}")
+                    await asyncio.sleep(10)  # 成功后等待上链
             else:
-                logger.info("📉 利润不足，跳过...")
-                await asyncio.sleep(3)
+                # ✅ 修改 3: 动态增加 CD 时间，彻底避开 429
+                await asyncio.sleep(5)
 
-            # 避免 API 限流，稍作休息
-            await asyncio.sleep(2)
-
-        except KeyboardInterrupt:
-            logger.info("用户停止脚本")
-            break
         except Exception as e:
             logger.error(f"主循环异常: {e}")
-            await asyncio.sleep(5)
+            await asyncio.sleep(10)
 
 
 if __name__ == "__main__":

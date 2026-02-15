@@ -1,8 +1,8 @@
+# src/jito_client.py
 import base58
 import aiohttp
 import random
 import base64
-import json
 from loguru import logger
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -12,61 +12,43 @@ from solders.transaction import VersionedTransaction
 from solana.rpc.async_api import AsyncClient
 from config.settings import settings
 
-
 class JitoClient:
     def __init__(self):
         self.engine_url = settings.JITO_ENGINE_URL
         self.tip_amount = settings.JITO_TIP_AMOUNT_SOL
 
     async def send_bundle(self, jupiter_tx_base64: str, payer_keypair: Keypair):
-        """
-        参考 SmartFlow3 成功经验修复版
-        """
         try:
-            # 1. 获取最新 Blockhash (确保时效性)
+            # 1. 获取最新 Blockhash (解决 400 报错)
             async with AsyncClient(settings.RPC_URL) as rpc_client:
                 recent_blockhash = (await rpc_client.get_latest_blockhash()).value.blockhash
 
-            # 2. 解析 Jupiter 返回的原始交易
+            # 2. 解析 Jupiter 交易
             raw_tx_bytes = base64.b64decode(jupiter_tx_base64)
             swap_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
 
-            # 3. 构建小费交易 (解决 400 错误的关键：账户锁定)
-            tip_acc_str = random.choice(settings.JITO_TIP_ACCOUNTS).strip()
-            tip_account_pubkey = Pubkey.from_string(tip_acc_str)
-
+            # 3. 构建并签署小费交易 (Tip)
+            # 增加 .strip() 防止配置中的不可见字符
+            tip_account = random.choice(settings.JITO_TIP_ACCOUNTS).strip()
             tip_ix = transfer(TransferParams(
                 from_pubkey=payer_keypair.pubkey(),
-                to_pubkey=tip_account_pubkey,
-                lamports=int(self.tip_amount * 10 ** 9)
+                to_pubkey=Pubkey.from_string(tip_account),
+                lamports=int(self.tip_amount * 10**9)
             ))
-
-            # 编译消息：显式包含小费账户并确保其在指令中被正确引用
-            tip_msg = MessageV0.try_compile(
-                payer_keypair.pubkey(),
-                [tip_ix],
-                [],  # 不引用额外的查找表
-                recent_blockhash
-            )
+            tip_msg = MessageV0.try_compile(payer_keypair.pubkey(), [tip_ix], [], recent_blockhash)
             signed_tip_tx = VersionedTransaction(tip_msg, [payer_keypair])
 
-            # 4. 重新签署 Swap 交易 (修复 Invalid Base58)
-            # 💡 关键点：参考 SmartFlow3 的逻辑，确保我们只拿 message 重新打包
+            # 4. 重新签署 Swap 交易 (关键：强制覆盖签名)
             signed_swap_tx = VersionedTransaction(swap_tx.message, [payer_keypair])
 
-            # 5. 序列化编码 (修复 Invalid Base58 的精准写法)
+            # 5. 安全序列化 (预防 Invalid Base58 string)
             try:
-                # 显式转为 bytes，如果这里崩溃会直接跳到 except
-                swap_bytes = bytes(signed_swap_tx)
-                tip_bytes = bytes(signed_tip_tx)
-
-                b58_swap = base58.b58encode(swap_bytes).decode('utf-8')
-                b58_tip = base58.b58encode(tip_bytes).decode('utf-8')
+                b58_swap = base58.b58encode(bytes(signed_swap_tx)).decode('utf-8')
+                b58_tip = base58.b58encode(bytes(signed_tip_tx)).decode('utf-8')
             except Exception as e:
-                logger.error(f"❌ 交易序列化/Base58编码失败: {e}")
+                logger.error(f"❌ 交易 Base58 编码失败: {e}")
                 return None
 
-            # 6. 构建 Jito Payload
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
@@ -74,22 +56,18 @@ class JitoClient:
                 "params": [[b58_swap, b58_tip]]
             }
 
+            # 6. 发送请求
             async with aiohttp.ClientSession() as session:
-                async with session.post(
-                        self.engine_url,
-                        json=payload,
-                        timeout=aiohttp.ClientTimeout(total=15)
-                ) as resp:
+                async with session.post(self.engine_url, json=payload, timeout=15) as resp:
                     data = await resp.json()
+                    if resp.status == 429:
+                        logger.error(f"⚠️ Jito 触发全局限流 (429)，请增加等待时间")
+                        return "RATE_LIMITED"
                     if resp.status != 200:
-                        logger.error(f"❌ Jito 拒绝 [{resp.status}]: {data.get('error')}")
+                        logger.error(f"❌ Jito 拒绝: {data.get('error')}")
                         return None
-
-                    bundle_id = data.get("result")
-                    if bundle_id:
-                        logger.success(f"✅ Bundle 成功提交! ID: {bundle_id}")
-                    return bundle_id
+                    return data.get("result")
 
         except Exception as e:
-            logger.error(f"💥 Jito 发送流程异常: {str(e)}")
+            logger.error(f"💥 Jito 模块异常: {str(e)}")
             return None
