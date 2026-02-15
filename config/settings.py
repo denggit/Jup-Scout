@@ -51,8 +51,11 @@ class Settings:
     MIN_NET_PROFIT_USDC = 0.01
 
     # --- Jito 引擎配置 ---
-    # 纽约节点 (延迟最低)
-    JITO_ENGINE_URL = "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles"
+    # # 纽约节点 (延迟最低)
+    # JITO_ENGINE_URL = "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles"
+
+    # config/settings.py 中的 JITO_ENGINE_URL 修改为：
+    JITO_ENGINE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
 
     # Jito 官方小费账户 (随机选一个转账)
     JITO_TIP_ACCOUNTS = [
