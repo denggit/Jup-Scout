@@ -51,17 +51,22 @@ class JitoClient:
             signed_tip_tx = VersionedTransaction(tip_msg, [payer_keypair])
 
             # 4. 重新签署 Swap 交易 (修复 Invalid Base58)
-            # 必须使用 payer 完整重签，确保 bytes(tx) 序列化成功
+            # 💡 关键点：参考 SmartFlow3 的逻辑，确保我们只拿 message 重新打包
             signed_swap_tx = VersionedTransaction(swap_tx.message, [payer_keypair])
 
-            # 5. 序列化编码 (参考 SmartFlow3 的严格模式)
+            # 5. 序列化编码 (修复 Invalid Base58 的精准写法)
             try:
-                b58_swap = base58.b58encode(bytes(signed_swap_tx)).decode('utf-8')
-                b58_tip = base58.b58encode(bytes(signed_tip_tx)).decode('utf-8')
+                # 显式转为 bytes，如果这里崩溃会直接跳到 except
+                swap_bytes = bytes(signed_swap_tx)
+                tip_bytes = bytes(signed_tip_tx)
+
+                b58_swap = base58.b58encode(swap_bytes).decode('utf-8')
+                b58_tip = base58.b58encode(tip_bytes).decode('utf-8')
             except Exception as e:
-                logger.error(f"❌ 序列化失败 (Base58异常): {e}")
+                logger.error(f"❌ 交易序列化/Base58编码失败: {e}")
                 return None
 
+            # 6. 构建 Jito Payload
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
