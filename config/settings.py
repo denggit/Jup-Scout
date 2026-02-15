@@ -20,8 +20,9 @@ class Settings:
     RPC_URL = os.getenv("RPC_URL", "https://api.mainnet-beta.solana.com")
     ENV = os.getenv("ENV", "DEV")
 
-    # Jupiter API 端点 (V6)
-    JUPITER_QUOTE_API = "https://quote-api.jup.ag/v6/quote"
+    # ✅ 新地址 (Jupiter Swap API V1)
+    # 官方文档: https://station.jup.ag/docs/apis/swap-api
+    JUPITER_QUOTE_API = "https://api.jup.ag/swap/v1/quote"
 
     # 代币地址常量
     SOL_MINT = "So11111111111111111111111111111111111111112"

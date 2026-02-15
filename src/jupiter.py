@@ -16,8 +16,8 @@ class JupiterClient:
             "outputMint": output_mint,
             "amount": int(amount),
             "slippageBps": 50,  # 0.5%
-            "onlyDirectRoutes": "false",
-            "asLegacyTransaction": "false",
+            # "onlyDirectRoutes": "false",
+            # "asLegacyTransaction": "false",
         }
         async with aiohttp.ClientSession() as session:
             async with session.get(self.api_url, params=params) as response:
