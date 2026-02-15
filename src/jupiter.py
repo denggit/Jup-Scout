@@ -9,20 +9,30 @@ class JupiterClient:
         self.api_url = settings.JUPITER_QUOTE_API
 
     async def get_quote(self, input_mint, output_mint, amount):
-        # ... 这个函数不用变，保持原样 ...
-        # 记得: amount 必须是整数 (Integers)
         params = {
             "inputMint": input_mint,
             "outputMint": output_mint,
             "amount": int(amount),
-            "slippageBps": 50,  # 0.5%
+            "slippageBps": 50,
             # "onlyDirectRoutes": "false",
             # "asLegacyTransaction": "false",
         }
+
         async with aiohttp.ClientSession() as session:
-            async with session.get(self.api_url, params=params) as response:
-                if response.status == 200:
+            try:
+                async with session.get(self.api_url, params=params) as response:
+                    # --- 修改开始: 增加详细调试日志 ---
+                    if response.status != 200:
+                        error_msg = await response.text()
+                        logger.error(f"❌ API 报错! 状态码: {response.status}")
+                        logger.error(f"❌ 错误详情: {error_msg}")
+                        logger.error(f"❌ 请求URL: {response.url}")
+                        return None
+                    # --- 修改结束 ---
+
                     return await response.json()
+            except Exception as e:
+                logger.error(f"❌ 网络请求异常: {e}")
                 return None
 
     async def check_arb_opportunity(self, invest_amount_usdc_units):
