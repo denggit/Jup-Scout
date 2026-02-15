@@ -8,11 +8,26 @@
 """
 import asyncio
 import time
+
+import httpx
 from loguru import logger
+
 from config.settings import settings
-from src.jupiter import JupiterClient
 from src.jito_client import JitoClient
-from solana.rpc.async_api import AsyncClient
+from src.jupiter import JupiterClient
+
+
+def patch_httpx_verify():
+    original_init = httpx.AsyncClient.__init__
+
+    def new_init(self, *args, **kwargs):
+        kwargs['verify'] = False
+        original_init(self, *args, **kwargs)
+
+    httpx.AsyncClient.__init__ = new_init
+
+
+patch_httpx_verify()
 
 # 配置日志
 logger.add("logs/jup_scout_trade.log", rotation="10 MB")
@@ -106,8 +121,12 @@ async def main():
                     logger.success(f"🎉 交易已提交! Bundle ID: {bundle_id}")
                     # 真实跑的时候，这里可以 break 或者 sleep 此时
                     break
+
+                # 成功开火后，多睡一会儿，等待链上确认
+                await asyncio.sleep(10)
             else:
                 logger.info("📉 利润不足，跳过...")
+                await asyncio.sleep(3)
 
             # 避免 API 限流，稍作休息
             await asyncio.sleep(2)
@@ -117,7 +136,7 @@ async def main():
             break
         except Exception as e:
             logger.error(f"主循环异常: {e}")
-            await asyncio.sleep(1)
+            await asyncio.sleep(5)
 
 
 if __name__ == "__main__":
