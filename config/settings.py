@@ -24,6 +24,8 @@ class Settings:
     # 官方文档: https://station.jup.ag/docs/apis/swap-api
     JUPITER_QUOTE_API = "https://api.jup.ag/swap/v1/quote"
 
+    JUPITER_API_KEY=os.getenv("JUPITER_API_KEY")
+
     # 代币地址常量
     SOL_MINT = "So11111111111111111111111111111111111111112"
     USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"  # 这是一个常量，千万别改错

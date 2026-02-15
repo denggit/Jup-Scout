@@ -9,14 +9,14 @@ class JupiterClient:
     def __init__(self):
         self.api_url = settings.JUPITER_QUOTE_API
 
-    # ✅ 新增：伪装成浏览器的请求头
     def _get_headers(self):
-        return {
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Origin": "https://jup.ag",
-            "Referer": "https://jup.ag/"
+        headers = {
+            "Accept": "application/json"
         }
+        # 从 settings 读取 Key
+        if settings.JUPITER_API_KEY:
+            headers["x-api-key"] = settings.JUPITER_API_KEY
+        return headers
 
     async def get_quote(self, input_mint, output_mint, amount):
         params = {
