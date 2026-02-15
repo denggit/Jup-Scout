@@ -1,12 +1,22 @@
 # src/jupiter.py
-from loguru import logger
-from config.settings import settings
 import aiohttp
+from loguru import logger
+
+from config.settings import settings
 
 
 class JupiterClient:
     def __init__(self):
         self.api_url = settings.JUPITER_QUOTE_API
+
+    # ✅ 新增：伪装成浏览器的请求头
+    def _get_headers(self):
+        return {
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json",
+            "Origin": "https://jup.ag",
+            "Referer": "https://jup.ag/"
+        }
 
     async def get_quote(self, input_mint, output_mint, amount):
         params = {
@@ -14,21 +24,23 @@ class JupiterClient:
             "outputMint": output_mint,
             "amount": int(amount),
             "slippageBps": 50,
-            # "onlyDirectRoutes": "false",
-            # "asLegacyTransaction": "false",
         }
 
         async with aiohttp.ClientSession() as session:
             try:
-                async with session.get(self.api_url, params=params) as response:
-                    # --- 修改开始: 增加详细调试日志 ---
+                # ✅ 修改点：把 headers 加进请求里
+                async with session.get(
+                        self.api_url,
+                        params=params,
+                        headers=self._get_headers()  # <--- 重点在这里
+                ) as response:
+
                     if response.status != 200:
                         error_msg = await response.text()
                         logger.error(f"❌ API 报错! 状态码: {response.status}")
                         logger.error(f"❌ 错误详情: {error_msg}")
-                        logger.error(f"❌ 请求URL: {response.url}")
+                        # 401 的话通常不需要打印 URL 了，因为知道是被拦了
                         return None
-                    # --- 修改结束 ---
 
                     return await response.json()
             except Exception as e:
