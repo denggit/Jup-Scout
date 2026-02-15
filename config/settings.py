@@ -10,6 +10,7 @@ import os
 
 from dotenv import load_dotenv
 from solders.keypair import Keypair
+from solders.pubkey import Pubkey
 
 load_dotenv()
 
@@ -69,8 +70,8 @@ class Settings:
         JITO_ENGINE_URLS = ["https://mainnet.block-engine.jito.wtf/api/v1/bundles"]
     JITO_ENGINE_URL = JITO_ENGINE_URLS[0]  # 兼容旧代码
 
-    # Jito 官方小费账户 (随机选一个转账)
-    JITO_TIP_ACCOUNTS = [
+    # Jito 官方小费账户 (仅保留可解析为 Pubkey 的，避免 Invalid Base58)
+    _JITO_TIP_ACCOUNTS_RAW = [
         "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
         "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
         "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
@@ -80,6 +81,18 @@ class Settings:
         "DttWaMuVvTiduZRNguLF8983agHzztVXiMVB3yKDhKS5",
         "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnIzKZ6jJ"
     ]
+    JITO_TIP_ACCOUNTS = []
+    for _a in _JITO_TIP_ACCOUNTS_RAW:
+        a = (_a or "").strip().replace("\ufeff", "").replace("\r", "").replace("\n", "")
+        if not a:
+            continue
+        try:
+            Pubkey.from_string(a)
+            JITO_TIP_ACCOUNTS.append(a)
+        except Exception:
+            pass
+    if not JITO_TIP_ACCOUNTS:
+        JITO_TIP_ACCOUNTS = list(_JITO_TIP_ACCOUNTS_RAW)
 
     # --- 钱包加载 ---
     try:

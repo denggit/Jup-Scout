@@ -72,16 +72,31 @@ class JitoClient:
                         logger.error(traceback.format_exc())
                         return None
 
-            # 3. 构建并签署小费交易 (Tip) - 放在最后
-            tip_account = random.choice(settings.JITO_TIP_ACCOUNTS).strip()
+            # 3. 构建小费交易 (Tip)，并选一个可解析的 tip 账户（避免 Invalid Base58）
+            tip_pubkey = None
+            candidates = list(settings.JITO_TIP_ACCOUNTS) or []
+            random.shuffle(candidates)
+            for raw in candidates:
+                s = (raw or "").strip().replace("\ufeff", "").replace("\r", "").replace("\n", "")
+                if not s:
+                    continue
+                try:
+                    tip_pubkey = Pubkey.from_string(s)
+                    break
+                except Exception:
+                    continue
+            if tip_pubkey is None:
+                logger.error("❌ 无有效 Jito tip 账户 (JITO_TIP_ACCOUNTS 均无法解析为 Base58)")
+                return None
             tip_ix = transfer(TransferParams(
                 from_pubkey=payer_keypair.pubkey(),
-                to_pubkey=Pubkey.from_string(tip_account),
+                to_pubkey=tip_pubkey,
                 lamports=int(self.tip_amount * 10**9)
             ))
             tip_msg = MessageV0.try_compile(payer_keypair.pubkey(), [tip_ix], [], recent_blockhash)
             signed_tip_tx = VersionedTransaction(tip_msg, [payer_keypair])
-            signed_txs.append(signed_tip_tx)
+            # Jito 要求 bundle 中必须有一笔 tx 对 tip 账户 write lock，且常要求 tip 放第一笔
+            signed_txs.insert(0, signed_tip_tx)
 
             # 4. 安全序列化所有交易为Base58格式（Jito Bundle要求）
             try:
