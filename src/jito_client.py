@@ -1,5 +1,6 @@
 # src/jito_client.py
 import base58
+import itertools
 import aiohttp
 import random
 import base64
@@ -12,10 +13,17 @@ from solders.transaction import VersionedTransaction
 from solana.rpc.async_api import AsyncClient
 from config.settings import settings
 
+
 class JitoClient:
+    _url_iter = None
+
     def __init__(self):
-        self.engine_url = settings.JITO_ENGINE_URL
         self.tip_amount = settings.JITO_TIP_AMOUNT_SOL
+        if JitoClient._url_iter is None:
+            JitoClient._url_iter = itertools.cycle(settings.JITO_ENGINE_URLS)
+
+    def _get_engine_url(self):
+        return next(JitoClient._url_iter)
 
     async def send_bundle(self, jupiter_tx_base64: str, payer_keypair: Keypair, additional_txs: list = None):
         """
@@ -111,18 +119,18 @@ class JitoClient:
                             logger.error(f"❌ 交易 {idx+1} 所有序列化方法都失败")
                             return None
                         
-                        # Base58编码
+                        # Base58编码（确保为 bytes，避免异常编码）
                         try:
-                            b58_tx = base58.b58encode(tx_bytes).decode('utf-8')
-                            if not b58_tx or len(b58_tx) < 100:  # Base58编码的交易应该很长
+                            raw = bytes(tx_bytes) if not isinstance(tx_bytes, bytes) else tx_bytes
+                            b58_tx = base58.b58encode(raw).decode("utf-8")
+                            if not b58_tx or len(b58_tx) < 100:
                                 logger.error(f"❌ 交易 {idx+1} Base58编码结果异常，长度: {len(b58_tx)}")
-                                logger.error(f"   原始bytes长度: {len(tx_bytes)}")
                                 return None
                             b58_txs.append(b58_tx)
                             logger.debug(f"✅ 交易 {idx+1} Base58编码成功，长度: {len(b58_tx)}")
                         except Exception as e:
-                            logger.error(f"❌ 交易 {idx+1} Base58编码失败: {e}")
-                            logger.error(f"   tx_bytes类型: {type(tx_bytes)}, 长度: {len(tx_bytes) if tx_bytes else 0}")
+                            logger.error(f"❌ 交易 {idx+1} Base58编码失败: {type(e).__name__}: {e}")
+                            logger.error(f"   tx_bytes 长度: {len(tx_bytes) if tx_bytes else 0}, 前32字节: {tx_bytes[:32].hex() if tx_bytes and len(tx_bytes) >= 32 else 'N/A'}")
                             import traceback
                             logger.error(traceback.format_exc())
                             return None
@@ -147,9 +155,10 @@ class JitoClient:
                 "params": [b58_txs]  # 所有交易打包在一起，确保原子执行
             }
 
-            # 6. 发送请求
+            # 6. 发送请求（轮询 Jito 端点以降低 429）
+            engine_url = self._get_engine_url()
             async with aiohttp.ClientSession() as session:
-                async with session.post(self.engine_url, json=payload, timeout=15) as resp:
+                async with session.post(engine_url, json=payload, timeout=15) as resp:
                     data = await resp.json()
                     if resp.status == 429:
                         logger.error(f"⚠️ Jito 触发全局限流 (429)，请增加等待时间")
@@ -157,8 +166,46 @@ class JitoClient:
                     if resp.status != 200:
                         logger.error(f"❌ Jito 拒绝: {data.get('error')}")
                         return None
+                    err = data.get("error")
+                    if err:
+                        msg = err.get("message", err) if isinstance(err, dict) else str(err)
+                        logger.error(f"❌ Jito JSON-RPC 错误: {msg}")
+                        return None
                     return data.get("result")
 
         except Exception as e:
             logger.error(f"💥 Jito 模块异常: {str(e)}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return None
+
+    async def get_bundle_status(self, bundle_id: str) -> dict | None:
+        """
+        查询 bundle 是否已上链。
+        sendBundle 返回 bundle_id 仅表示已被 Jito 接受，不代表已上链。
+        需用 getBundleStatuses 确认。
+        """
+        if not bundle_id:
+            return None
+        try:
+            engine_url = self._get_engine_url()
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getBundleStatuses",
+                "params": [[bundle_id]],
+            }
+            async with aiohttp.ClientSession() as session:
+                async with session.post(engine_url, json=payload, timeout=10) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await resp.json()
+                    result = data.get("result", {})
+                    if isinstance(result, dict):
+                        value = result.get("value")
+                        if value and isinstance(value, list) and len(value) > 0:
+                            return value[0]
+                    return None
+        except Exception as e:
+            logger.debug(f"getBundleStatus 异常: {e}")
             return None

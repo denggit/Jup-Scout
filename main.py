@@ -53,6 +53,10 @@ async def main():
     logger.info(f"💵 每次投入: {amount_usdc} USDC")
     logger.info(f"🛑 最低净利要求: ${settings.MIN_NET_PROFIT_USDC}")
     logger.info(f"🛡️ 成本估算基准: SOL = ${settings.FIXED_SOL_PRICE_USDC}")
+    if settings.JUPITER_API_KEYS:
+        logger.info(f"🔑 Jupiter API Key 池: {len(settings.JUPITER_API_KEYS)} 个")
+    if len(settings.JITO_ENGINE_URLS) > 1:
+        logger.info(f"🌐 Jito 端点池: {len(settings.JITO_ENGINE_URLS)} 个")
 
     # --- 死循环：开始持续巡逻 ---
     while True:
@@ -116,7 +120,20 @@ async def main():
                 elif res:
                     logger.success(f"🎉 原子套利Bundle已提交! Bundle ID: {res}")
                     logger.info("✅ 两个swap将在同一区块中原子执行，零风险套利!")
-                    await asyncio.sleep(10)  # 成功后等待上链
+                    # 轮询确认 bundle 是否真的上链（sendBundle 成功仅表示被接受，不代表已上链）
+                    for _ in range(12):  # 约 12 秒
+                        await asyncio.sleep(1)
+                        status = await jito_client.get_bundle_status(res)
+                        if status:
+                            conf = status.get("confirmation_status") or status.get("confirmationStatus")
+                            if conf in ("confirmed", "finalized"):
+                                logger.success(f"✅ Bundle 已上链! 状态: {conf}")
+                                break
+                            if conf == "processed":
+                                logger.info(f"📦 Bundle 已处理, 等待确认...")
+                        else:
+                            logger.debug(f"⏳ 等待 Bundle 上链...")
+                    await asyncio.sleep(5)
                 else:
                     logger.error("❌ Bundle提交失败")
                     await asyncio.sleep(5)

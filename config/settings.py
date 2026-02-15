@@ -23,8 +23,13 @@ class Settings:
     JUPITER_QUOTE_API = "https://api.jup.ag/swap/v1/quote"
     JUPITER_SWAP_API = "https://api.jup.ag/swap/v1/swap"
 
-    # 如果有 Key 就读取，没有就是空
-    JUPITER_API_KEY = os.getenv("JUPITER_API_KEY", None)
+    # Jupiter API Key 池（用分号分隔多个 key，轮询使用以降低 429 概率）
+    # 示例 .env: JUPITER_API_KEYS=key1;key2;key3
+    _jupiter_keys_raw = os.getenv("JUPITER_API_KEYS", "")
+    JUPITER_API_KEYS = [k.strip() for k in _jupiter_keys_raw.split(";") if k.strip()]
+    # 兼容旧配置：若无 JUPITER_API_KEYS，则使用 JUPITER_API_KEY
+    if not JUPITER_API_KEYS and os.getenv("JUPITER_API_KEY"):
+        JUPITER_API_KEYS = [os.getenv("JUPITER_API_KEY").strip()]
 
     # --- 代币地址 (常量) ---
     SOL_MINT = "So11111111111111111111111111111111111111112"
@@ -39,8 +44,8 @@ class Settings:
 
     # --- ⚡️ 成本与风控配置 (你的核心要求) ---
     # 1. 假定 SOL 价格 (用于快速计算 Gas 和 小费成本)
-    # 设为 1000U 是一个保守策略：如果按 1000U 算都能覆盖成本，实际肯定赚
-    FIXED_SOL_PRICE_USDC = 1000.0
+    # 设为 1000U 是一个保守策略：如果按 500U 算都能覆盖成本，实际肯定赚
+    FIXED_SOL_PRICE_USDC = 500.0
 
     # 2. 预估 Gas 费 (Solana 基础费是 0.000005，我们按 2 个签名算 0.00001)
     ESTIMATED_GAS_SOL = 0.00001
@@ -57,8 +62,12 @@ class Settings:
     # # 纽约节点 (延迟最低)
     # JITO_ENGINE_URL = "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles"
 
-    # config/settings.py 中的 JITO_ENGINE_URL 修改为：
-    JITO_ENGINE_URL = "https://mainnet.block-engine.jito.wtf/api/v1/bundles"
+    # Jito 引擎 URL 池（分号分隔，轮询使用以降低 429 概率）
+    # 示例 .env: JITO_ENGINE_URLS=https://mainnet.block-engine.jito.wtf/api/v1/bundles;https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles
+    JITO_ENGINE_URLS = ["https://mainnet.block-engine.jito.wtf/api/v1/bundles", "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles"]
+    if not JITO_ENGINE_URLS:
+        JITO_ENGINE_URLS = ["https://mainnet.block-engine.jito.wtf/api/v1/bundles"]
+    JITO_ENGINE_URL = JITO_ENGINE_URLS[0]  # 兼容旧代码
 
     # Jito 官方小费账户 (随机选一个转账)
     JITO_TIP_ACCOUNTS = [
