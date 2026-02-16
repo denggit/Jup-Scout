@@ -115,24 +115,41 @@ async def main():
                 )
 
                 if res == "RATE_LIMITED":
-                    logger.info("⏳ 触发限流，进入 30 秒冷却期...")
-                    await asyncio.sleep(30)
+                    cooldown = max(30, jito_client.get_rate_limit_wait_seconds())
+                    logger.info(f"⏳ 触发限流，进入 {cooldown} 秒冷却期...")
+                    await asyncio.sleep(cooldown)
                 elif res:
-                    logger.success(f"🎉 原子套利Bundle已提交! Bundle ID: {res}")
-                    logger.info("✅ 两个swap将在同一区块中原子执行，零风险套利!")
-                    # 轮询确认 bundle 是否真的上链（sendBundle 成功仅表示被接受，不代表已上链）
+                    logger.success(f"🎉 原子套利Bundle已被Jito接受! Bundle ID: {res}")
+                    logger.info("ℹ️ send_bundle 成功仅代表被接收，需等待真正上链确认")
+                    # 轮询确认 bundle 是否真的上链（send_bundle 成功仅表示被接受，不代表已上链）
+                    is_landed = False
                     for _ in range(12):  # 约 12 秒
                         await asyncio.sleep(1)
                         status = await jito_client.get_bundle_status(res)
                         if status:
                             conf = status.get("confirmation_status") or status.get("confirmationStatus")
+                            inflight_status = status.get("status")
                             if conf in ("confirmed", "finalized"):
                                 logger.success(f"✅ Bundle 已上链! 状态: {conf}")
+                                is_landed = True
+                                break
+                            if inflight_status == "Landed":
+                                landed_slot = status.get("landed_slot") or status.get("landedSlot")
+                                logger.success(f"✅ Bundle 已落地区块! landed_slot={landed_slot}")
+                                is_landed = True
+                                break
+                            if inflight_status in ("Failed", "Invalid"):
+                                logger.error(f"❌ Bundle 未上链: {inflight_status}, 详情: {status}")
                                 break
                             if conf == "processed":
                                 logger.info(f"📦 Bundle 已处理, 等待确认...")
+                            elif inflight_status:
+                                logger.info(f"📦 Bundle Inflight 状态: {inflight_status}")
                         else:
                             logger.debug(f"⏳ 等待 Bundle 上链...")
+
+                    if not is_landed:
+                        logger.warning(f"⚠️ Bundle 在轮询窗口内未确认上链，可能已过期/被丢弃。Bundle ID: {res}")
                     await asyncio.sleep(5)
                 else:
                     logger.error("❌ Bundle提交失败")

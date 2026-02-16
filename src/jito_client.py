@@ -4,6 +4,7 @@ import itertools
 import aiohttp
 import random
 import base64
+import time
 from loguru import logger
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
@@ -136,11 +137,33 @@ class JitoClient:
 
     def __init__(self):
         self.tip_amount = settings.JITO_TIP_AMOUNT_SOL
+        self._rate_limited_until = 0.0
+        self._bundle_engine_map = {}
         if JitoClient._url_iter is None:
             JitoClient._url_iter = itertools.cycle(settings.JITO_ENGINE_URLS)
 
     def _get_engine_url(self):
         return next(JitoClient._url_iter)
+
+    @staticmethod
+    async def _post_json_rpc(engine_url: str, payload: dict, timeout: int = 10):
+        async with aiohttp.ClientSession() as session:
+            async with session.post(engine_url, json=payload, timeout=timeout) as resp:
+                data = await resp.json(content_type=None)
+                return resp.status, data, resp.headers
+
+    def _set_rate_limit_cooldown(self, retry_after_header=None):
+        retry_after = 0
+        try:
+            retry_after = int(float(retry_after_header)) if retry_after_header else 0
+        except Exception:
+            retry_after = 0
+        cooldown = max(30, retry_after)
+        self._rate_limited_until = max(self._rate_limited_until, time.time() + cooldown)
+        return cooldown
+
+    def get_rate_limit_wait_seconds(self) -> int:
+        return max(0, int(self._rate_limited_until - time.time()))
 
     async def send_bundle(self, jupiter_tx_base64: str, payer_keypair: Keypair, additional_txs: list = None):
         """
@@ -152,6 +175,11 @@ class JitoClient:
         :return: Bundle ID或错误信息
         """
         try:
+            wait_seconds = self.get_rate_limit_wait_seconds()
+            if wait_seconds > 0:
+                logger.warning(f"⏳ Jito 全局冷却中，剩余 {wait_seconds} 秒")
+                return "RATE_LIMITED"
+
             # 1. 取统一 blockhash，并在同一 RPC 会话内拉取 ALT、用 try_compile 重建 swap message
             async with AsyncClient(settings.RPC_URL) as rpc_client:
                 recent_blockhash = (await rpc_client.get_latest_blockhash()).value.blockhash
@@ -279,31 +307,37 @@ class JitoClient:
                 logger.error(traceback.format_exc())
                 return None
 
-            # 5. 构建Bundle payload
+            # 5. 构建 Bundle payload
             payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
-                "method": "sendBundle",
+                "method": "sendBundle",  # Jito JSON-RPC 方法名固定为 sendBundle
                 "params": [b58_txs]  # 所有交易打包在一起，确保原子执行
             }
 
             # 6. 发送请求（轮询 Jito 端点以降低 429）
             engine_url = self._get_engine_url()
-            async with aiohttp.ClientSession() as session:
-                async with session.post(engine_url, json=payload, timeout=15) as resp:
-                    data = await resp.json()
-                    if resp.status == 429:
-                        logger.error(f"⚠️ Jito 触发全局限流 (429)，请增加等待时间")
-                        return "RATE_LIMITED"
-                    if resp.status != 200:
-                        logger.error(f"❌ Jito 拒绝: {data.get('error')}")
-                        return None
-                    err = data.get("error")
-                    if err:
-                        msg = err.get("message", err) if isinstance(err, dict) else str(err)
-                        logger.error(f"❌ Jito JSON-RPC 错误: {msg}")
-                        return None
-                    return data.get("result")
+            status, data, headers = await self._post_json_rpc(engine_url, payload, timeout=15)
+            if status == 429:
+                cooldown = self._set_rate_limit_cooldown(headers.get("Retry-After"))
+                logger.error(f"⚠️ Jito 触发全局限流 (429)，进入 {cooldown} 秒冷却")
+                return "RATE_LIMITED"
+            if status != 200:
+                logger.error(f"❌ Jito 拒绝: {data.get('error') if isinstance(data, dict) else data}")
+                return None
+            err = data.get("error") if isinstance(data, dict) else None
+            if err:
+                msg = err.get("message", err) if isinstance(err, dict) else str(err)
+                logger.error(f"❌ Jito JSON-RPC 错误: {msg}")
+                if "429" in str(msg).lower() or "rate" in str(msg).lower():
+                    cooldown = self._set_rate_limit_cooldown()
+                    logger.warning(f"⏳ 根据错误信息触发限流冷却 {cooldown} 秒")
+                    return "RATE_LIMITED"
+                return None
+            bundle_id = data.get("result") if isinstance(data, dict) else None
+            if bundle_id:
+                self._bundle_engine_map[bundle_id] = engine_url
+            return bundle_id
 
         except Exception as e:
             logger.error(f"💥 Jito 模块异常: {str(e)}")
@@ -314,30 +348,46 @@ class JitoClient:
     async def get_bundle_status(self, bundle_id: str) -> dict | None:
         """
         查询 bundle 是否已上链。
-        sendBundle 返回 bundle_id 仅表示已被 Jito 接受，不代表已上链。
+        send_bundle 返回 bundle_id 仅表示已被 Jito 接受，不代表已上链。
         需用 getBundleStatuses 确认。
         """
         if not bundle_id:
             return None
         try:
-            engine_url = self._get_engine_url()
-            payload = {
+            engine_url = self._bundle_engine_map.get(bundle_id) or self._get_engine_url()
+            status_payload = {
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "getBundleStatuses",
                 "params": [[bundle_id]],
             }
-            async with aiohttp.ClientSession() as session:
-                async with session.post(engine_url, json=payload, timeout=10) as resp:
-                    if resp.status != 200:
-                        return None
-                    data = await resp.json()
-                    result = data.get("result", {})
-                    if isinstance(result, dict):
-                        value = result.get("value")
-                        if value and isinstance(value, list) and len(value) > 0:
-                            return value[0]
-                    return None
+
+            inflight_payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getInflightBundleStatuses",
+                "params": [[bundle_id]],
+            }
+
+            merged = {}
+
+            status_code, data, _ = await self._post_json_rpc(engine_url, status_payload, timeout=10)
+            if status_code == 200 and isinstance(data, dict):
+                result = data.get("result", {})
+                if isinstance(result, dict):
+                    value = result.get("value")
+                    if value and isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
+                        merged.update(value[0])
+
+            inflight_code, inflight_data, _ = await self._post_json_rpc(engine_url, inflight_payload, timeout=10)
+            if inflight_code == 200 and isinstance(inflight_data, dict):
+                inflight_result = inflight_data.get("result", {})
+                if isinstance(inflight_result, dict):
+                    inflight_value = inflight_result.get("value")
+                    if inflight_value and isinstance(inflight_value, list) and len(inflight_value) > 0 and isinstance(inflight_value[0], dict):
+                        merged.update(inflight_value[0])
+
+            return merged or None
         except Exception as e:
             logger.debug(f"getBundleStatus 异常: {e}")
             return None
