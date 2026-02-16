@@ -31,16 +31,47 @@ def _parse_alt_addresses(data: bytes) -> list:
     return [Pubkey.from_bytes(data[start + i * 32 : start + (i + 1) * 32]) for i in range(n)]
 
 
-# Vote account 前缀（Jito 禁止锁定 vote accounts）
-_VOTE_ACCOUNT_PREFIXES = [
-    "Vote111111111111111111111111111111111111111",
-    "Vote111111111111111111111111111111111111112",
-]
+# Vote 程序 ID：归属该程序的 account 均为 vote account，Jito 禁止锁定为 writable
+VOTE_PROGRAM_ID = Pubkey.from_string("Vote111111111111111111111111111111111111111")
+VOTE_PROGRAM_ID_STR = "Vote111111111111111111111111111111111111111"
 
-def _is_vote_account(pubkey: Pubkey) -> bool:
-    """检查是否为 vote account"""
-    key_str = str(pubkey)
-    return any(key_str.startswith(prefix) for prefix in _VOTE_ACCOUNT_PREFIXES)
+
+def tx_touches_vote_account(tx) -> bool:
+    """提交前硬校验：交易是否触碰 Vote 程序（任一笔触碰则整包丢弃）。"""
+    msg = getattr(tx.message, "value", tx.message)
+    for acc in msg.account_keys:
+        if str(acc) == VOTE_PROGRAM_ID_STR:
+            return True
+    return False
+
+
+def _is_vote_program(pubkey: Pubkey) -> bool:
+    """是否为 Vote 程序本身（也应只读）"""
+    return pubkey == VOTE_PROGRAM_ID
+
+
+async def _fetch_vote_account_set(rpc_client: AsyncClient, pubkeys: list) -> set:
+    """通过 RPC 查询哪些 pubkey 的 owner 是 Vote 程序，返回 vote account 的 pubkey 集合。"""
+    if not pubkeys:
+        return set()
+    out = set()
+    try:
+        # RPC 单次请求数量有限，分批查询
+        batch_size = 100
+        for start in range(0, len(pubkeys), batch_size):
+            batch = pubkeys[start : start + batch_size]
+            resp = await rpc_client.get_multiple_accounts(batch)
+            value = getattr(resp, "value", None) or []
+            for i, acc in enumerate(value):
+                if i >= len(batch):
+                    break
+                if acc is not None:
+                    owner = getattr(acc, "owner", None)
+                    if owner is not None and bytes(owner) == bytes(VOTE_PROGRAM_ID):
+                        out.add(batch[i])
+    except Exception as e:
+        logger.debug(f"get_multiple_accounts 查询 vote owner 失败: {e}")
+    return out
 
 
 async def _fetch_alt_account(rpc_client: AsyncClient, lookup_table_pubkey: Pubkey) -> list:
@@ -56,8 +87,14 @@ async def _fetch_alt_account(rpc_client: AsyncClient, lookup_table_pubkey: Pubke
         return []
 
 
-def _decompile_to_instructions(msg: MessageV0, full_account_keys: list, is_writable_by_index: dict) -> list:
-    """将 MessageV0 的 CompiledInstruction 反编译为 Instruction，用于 try_compile。"""
+def _decompile_to_instructions(
+    msg: MessageV0,
+    full_account_keys: list,
+    is_writable_by_index: dict,
+    vote_account_pubkeys: set = None,
+) -> list:
+    """将 MessageV0 反编译为 Instruction；归属 Vote 程序的 account 强制 readonly。"""
+    vote_account_pubkeys = vote_account_pubkeys or set()
     len_static = len(msg.account_keys)
     instructions = []
     for ci in msg.instructions:
@@ -74,9 +111,10 @@ def _decompile_to_instructions(msg: MessageV0, full_account_keys: list, is_writa
             account_key = full_account_keys[i]
             is_signer = msg.is_signer(i) if i < len_static and hasattr(msg, "is_signer") else False
             is_writable = is_writable_by_index.get(i, False)
-            if _is_vote_account(account_key):
+            # 归属 Vote 程序的 account 或 Vote 程序本身一律只读，避免 Jito 报 vote account lock
+            if _is_vote_program(account_key) or account_key in vote_account_pubkeys:
                 is_writable = False
-                logger.debug(f"🔒 检测到 vote account {account_key}，强制 readonly")
+                logger.debug(f"🔒 vote account/program {account_key} 强制 readonly")
             account_metas.append(AccountMeta(account_key, is_signer, is_writable))
         instructions.append(Instruction(program_id, data, account_metas))
     return instructions
@@ -138,7 +176,10 @@ async def _rebuild_message_with_blockhash_async(rpc_client: AsyncClient, orig_me
         if key not in alt_addresses_by_key:
             alt_addresses_by_key[key] = await _fetch_alt_account(rpc_client, key)
     full_keys, address_lookup_table_accounts, is_writable_by_index = _build_full_account_keys_and_alt_accounts(msg, alt_addresses_by_key)
-    instructions = _decompile_to_instructions(msg, full_keys, is_writable_by_index)
+    # 通过 RPC 识别归属 Vote 程序的 account（验证者 vote 账户），反编译时强制只读
+    unique_keys = list(dict.fromkeys(full_keys))
+    vote_account_pubkeys = await _fetch_vote_account_set(rpc_client, unique_keys)
+    instructions = _decompile_to_instructions(msg, full_keys, is_writable_by_index, vote_account_pubkeys)
     if not instructions:
         logger.error("反编译得到 0 条 instruction，拒绝使用裸构造（会导致 vote account lock）")
         raise ValueError("decompile failed: no instructions")
@@ -290,6 +331,7 @@ class JitoClient:
             if tip_pubkey is None:
                 logger.error("❌ 无有效 Jito tip 账户 (JITO_TIP_ACCOUNTS 均无法解析为 Base58)")
                 return None
+            # 黄金规则：tip 独立一笔，仅 SystemProgram::Transfer，只 touch payer / tip account / system program
             tip_ix = transfer(TransferParams(
                 from_pubkey=payer_keypair.pubkey(),
                 to_pubkey=tip_pubkey,
@@ -297,19 +339,25 @@ class JitoClient:
             ))
             tip_msg = MessageV0.try_compile(payer_keypair.pubkey(), [tip_ix], [], recent_blockhash)
             signed_tip_tx = VersionedTransaction(tip_msg, [payer_keypair])
-            # tip 必须是 bundle 最后一笔：[swap..., tip]。auction 顺序模拟时先执行 swap，tip 最后才能被正确计入 write-lock eligibility
+            # tip 必须是 bundle 最后一笔：[swap..., tip]
             signed_txs.append(signed_tip_tx)
 
-            # 4.1 验证交易：确保没有 vote accounts 被锁定为 writable
+            # 4.1 验证交易：确保 Vote 程序 / vote accounts 未被锁定为 writable
             for idx, signed_tx in enumerate(signed_txs):
-                msg = signed_tx.message
+                msg = getattr(signed_tx.message, "value", signed_tx.message)
                 for i, key in enumerate(msg.account_keys):
-                    if _is_vote_account(key):
+                    if _is_vote_program(key):
                         is_writable = msg.is_maybe_writable(i) if hasattr(msg, "is_maybe_writable") else False
                         if is_writable:
-                            logger.error(f"❌ 交易 {idx+1} 锁定 vote account {key} 为 writable，拒绝发送")
+                            logger.error(f"❌ 交易 {idx+1} 锁定 vote 相关账户 {key} 为 writable，拒绝发送")
                             return "VOTE_ACCOUNT_LOCKED"
-                logger.debug(f"✅ 交易 {idx+1} 验证通过，无 vote accounts 锁定")
+                logger.debug(f"✅ 交易 {idx+1} 验证通过，无 vote 相关 writable")
+
+            # 4.1.1 提交前硬校验：任一笔触碰 Vote 程序则直接丢弃 bundle，不提交
+            for i, tx in enumerate(signed_txs):
+                if tx_touches_vote_account(tx):
+                    logger.error(f"❌ 交易 {i} 触碰 vote program，直接丢弃 bundle，不提交")
+                    return "VOTE_ACCOUNT_LOCKED"
 
             # 4.2 安全序列化所有交易为Base58格式（Jito Bundle要求）
             try:
@@ -412,8 +460,11 @@ class JitoClient:
                     if "429" in err_str or "rate" in err_str:
                         got_rate_limited = True
                         continue
-                    # bundle 无效（vote、simulation failed 等）：同一 bundle 不再发到其他端点
+                    # bundle 无效（vote、simulation failed 等）：打印每笔 tx 的 account keys 便于排查
                     if "vote" in err_str or "lock" in err_str or "simulation" in err_str:
+                        for i, tx in enumerate(signed_txs):
+                            msg = getattr(tx.message, "value", tx.message)
+                            logger.error(f"❌ tx[{i}] accounts: {[str(a) for a in msg.account_keys]}")
                         if "vote" in err_str or "lock" in err_str:
                             return "VOTE_ACCOUNT_LOCKED"
                         return None

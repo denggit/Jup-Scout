@@ -1,9 +1,19 @@
 # src/jupiter.py
+import base64
 import itertools
 import aiohttp
 from loguru import logger
+from solders.message import MessageV0
+from solders.pubkey import Pubkey
+from solders.transaction import VersionedTransaction
 
 from config.settings import settings
+
+# 黄金规则：bundle 只做 swap + swap + tip，不创建/关闭账户、不 wrap/unwrap
+# 以下 program 若出现在 swap 交易中则视为非 pure swap，直接 reject
+ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
+TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+TOKEN_CLOSE_ACCOUNT_DISCRIMINATOR = 9  # SPL Token Instruction::CloseAccount
 
 
 class JupiterClient:
@@ -21,6 +31,37 @@ class JupiterClient:
             if key:
                 headers["x-api-key"] = key
         return headers
+
+    @staticmethod
+    def swap_tx_has_ata_create_or_close(swap_tx_base64: str) -> bool:
+        """
+        黄金规则：只接受 pure swap。若交易里含 createAssociatedTokenAccount 或 closeAccount，返回 True（应 reject）。
+        不解析 lookup table，只检查静态 account_keys 中的 program_id。
+        """
+        try:
+            raw = base64.b64decode(swap_tx_base64)
+            tx = VersionedTransaction.from_bytes(raw)
+            msg = getattr(tx.message, "value", tx.message)
+            if not isinstance(msg, MessageV0):
+                return False
+            static_keys = msg.account_keys
+            for ci in msg.instructions:
+                program_id_index = getattr(ci, "program_id_index", 0)
+                if program_id_index >= len(static_keys):
+                    continue
+                program_id = static_keys[program_id_index]
+                if program_id == ATA_PROGRAM_ID:
+                    logger.warning("🔄 Quote 含 createAssociatedTokenAccount，reject（非 pure swap）")
+                    return True
+                if program_id == TOKEN_PROGRAM_ID:
+                    data = getattr(ci, "data", b"")
+                    if len(data) > 0 and data[0] == TOKEN_CLOSE_ACCOUNT_DISCRIMINATOR:
+                        logger.warning("🔄 Quote 含 closeAccount，reject（非 pure swap）")
+                        return True
+            return False
+        except Exception as e:
+            logger.debug(f"swap_tx_has_ata_create_or_close 解析异常: {e}")
+            return False
 
     async def get_quote(self, input_mint, output_mint, amount):
         params = {
@@ -58,9 +99,8 @@ class JupiterClient:
         payload = {
             "quoteResponse": quote_response,
             "userPublicKey": str(settings.PUB_KEY),
-            "wrapAndUnwrapSol": True,
-            # 关键点：Jito 模式下这里设为 0 或 auto，因为我们会单独付小费
-            # 如果不走 Jito，这里要设很高才能抢到
+            # 黄金规则：永远用 wSOL ATA 常驻，不在 bundle 里 wrap/unwrap
+            "wrapAndUnwrapSol": False,
             "computeUnitPriceMicroLamports": 0
         }
 

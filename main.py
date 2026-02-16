@@ -117,6 +117,16 @@ async def main():
                 if not swap_txs:
                     continue
 
+                # 黄金规则：只接受 pure swap，含 create ATA / closeAccount 直接 reject
+                for idx, tx_b64 in enumerate(swap_txs):
+                    if jup_client.swap_tx_has_ata_create_or_close(tx_b64):
+                        logger.warning(f"❌ 第 {idx + 1} 腿含 create ATA 或 closeAccount，reject 此机会（非 pure swap）")
+                        swap_txs = None
+                        break
+                if not swap_txs:
+                    await asyncio.sleep(random.uniform(2, 4))
+                    continue
+
                 logger.info("🔒 打包原子 bundle，确保零风险套利...")
                 first_tx = swap_txs[0]
                 additional_txs = swap_txs[1:] if len(swap_txs) > 1 else None

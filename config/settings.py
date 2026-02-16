@@ -34,6 +34,7 @@ class Settings:
 
     # --- 代币地址 (常量) ---
     # 路径中出现的代币必须在 settings 中配置 XX_MINT，否则会报错
+    # 黄金规则：用 wSOL，不临时 wrap。SOL_MINT 即 wSOL mint；请提前创建好 wSOL ATA，bundle 内不 wrap/unwrap
     SOL_MINT = "So11111111111111111111111111111111111111112"
     USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
     # 示例：若路径含 BONK，则添加 BONK_MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
