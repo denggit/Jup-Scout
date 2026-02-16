@@ -56,8 +56,9 @@ async def _fetch_alt_account(rpc_client: AsyncClient, lookup_table_pubkey: Pubke
         return []
 
 
-def _decompile_to_instructions(msg: MessageV0, full_account_keys: list) -> list:
+def _decompile_to_instructions(msg: MessageV0, full_account_keys: list, is_writable_by_index: dict) -> list:
     """将 MessageV0 的 CompiledInstruction 反编译为 Instruction，用于 try_compile。"""
+    len_static = len(msg.account_keys)
     instructions = []
     for ci in msg.instructions:
         program_id_index = getattr(ci, "program_id_index", 0)
@@ -71,42 +72,55 @@ def _decompile_to_instructions(msg: MessageV0, full_account_keys: list) -> list:
             if i >= len(full_account_keys):
                 continue
             account_key = full_account_keys[i]
-            is_signer = msg.is_signer(i) if hasattr(msg, "is_signer") else False
-
-            # 关键修改：vote accounts强制设为readonly，默认writable=False更安全
+            is_signer = msg.is_signer(i) if i < len_static and hasattr(msg, "is_signer") else False
+            is_writable = is_writable_by_index.get(i, False)
             if _is_vote_account(account_key):
                 is_writable = False
-                logger.debug(f"🔒 检测到vote account {account_key}，强制设为readonly")
-            else:
-                is_writable = msg.is_maybe_writable(i) if hasattr(msg, "is_maybe_writable") else False  # 默认False更安全
-
+                logger.debug(f"🔒 检测到 vote account {account_key}，强制 readonly")
             account_metas.append(AccountMeta(account_key, is_signer, is_writable))
         instructions.append(Instruction(program_id, data, account_metas))
     return instructions
 
 
+def _to_index_list(val) -> list:
+    """将 writable_indexes/readonly_indexes 转为 index 列表，支持 bytes/list/tuple"""
+    if val is None:
+        return []
+    if isinstance(val, bytes):
+        return list(val)
+    if isinstance(val, (list, tuple)):
+        return list(val)
+    return []
+
+
 def _build_full_account_keys_and_alt_accounts(msg: MessageV0, alt_addresses_by_key: dict) -> tuple:
     """
     按 V0 顺序构建完整 account 列表，并构建 try_compile 所需的 AddressLookupTableAccount 列表。
-    返回 (full_account_keys, address_lookup_table_accounts)。
+    返回 (full_account_keys, address_lookup_table_accounts, is_writable_by_index)。
     """
     full_keys = list(msg.account_keys)
+    is_writable_by_index = {}
+    for i in range(len(msg.account_keys)):
+        is_writable_by_index[i] = msg.is_maybe_writable(i) if hasattr(msg, "is_maybe_writable") else False
     lookup_accounts = []
+    idx = len(msg.account_keys)
     for lookup in msg.address_table_lookups:
         key = lookup.account_key
-        addresses = alt_addresses_by_key.get(key)
-        if addresses is None:
-            addresses = []
+        addresses = alt_addresses_by_key.get(key) or []
         lookup_accounts.append(AddressLookupTableAccount(key=key, addresses=addresses))
-        writable = getattr(lookup, "writable_indexes", None) or lookup.writable_indexes
-        readonly = getattr(lookup, "readonly_indexes", None) or lookup.readonly_indexes
-        for i in (list(writable) if isinstance(writable, bytes) else []):
+        writable = _to_index_list(getattr(lookup, "writable_indexes", []) or [])
+        readonly = _to_index_list(getattr(lookup, "readonly_indexes", []) or [])
+        for i in writable:
             if i < len(addresses):
                 full_keys.append(addresses[i])
-        for i in (list(readonly) if isinstance(readonly, bytes) else []):
+                is_writable_by_index[idx] = True
+                idx += 1
+        for i in readonly:
             if i < len(addresses):
                 full_keys.append(addresses[i])
-    return full_keys, lookup_accounts
+                is_writable_by_index[idx] = False
+                idx += 1
+    return full_keys, lookup_accounts, is_writable_by_index
 
 
 async def _rebuild_message_with_blockhash_async(rpc_client: AsyncClient, orig_message, recent_blockhash):
@@ -123,17 +137,11 @@ async def _rebuild_message_with_blockhash_async(rpc_client: AsyncClient, orig_me
         key = lookup.account_key
         if key not in alt_addresses_by_key:
             alt_addresses_by_key[key] = await _fetch_alt_account(rpc_client, key)
-    full_keys, address_lookup_table_accounts = _build_full_account_keys_and_alt_accounts(msg, alt_addresses_by_key)
-    instructions = _decompile_to_instructions(msg, full_keys)
+    full_keys, address_lookup_table_accounts, is_writable_by_index = _build_full_account_keys_and_alt_accounts(msg, alt_addresses_by_key)
+    instructions = _decompile_to_instructions(msg, full_keys, is_writable_by_index)
     if not instructions:
-        logger.warning("反编译得到 0 条 instruction，回退到裸构造")
-        return MessageV0(
-            msg.header,
-            msg.account_keys,
-            recent_blockhash,
-            msg.instructions,
-            msg.address_table_lookups,
-        )
+        logger.error("反编译得到 0 条 instruction，拒绝使用裸构造（会导致 vote account lock）")
+        raise ValueError("decompile failed: no instructions")
     try:
         return MessageV0.try_compile(
             payer,
@@ -142,14 +150,8 @@ async def _rebuild_message_with_blockhash_async(rpc_client: AsyncClient, orig_me
             recent_blockhash,
         )
     except Exception as e:
-        logger.warning(f"try_compile 失败 ({e})，回退到裸构造")
-        return MessageV0(
-            msg.header,
-            msg.account_keys,
-            recent_blockhash,
-            msg.instructions,
-            msg.address_table_lookups,
-        )
+        logger.error(f"try_compile 失败 ({e})，拒绝使用裸构造（会导致 vote account lock）")
+        raise
 
 
 class JitoClient:
@@ -178,20 +180,27 @@ class JitoClient:
 
     def _set_engine_cooldown(self, engine_url, retry_after=None):
         """标记特定端点进入冷却"""
-        base_cooldown = 45  # 基础冷却45秒（单端点环境需更保守）
+        base_cooldown = 45
         if retry_after:
             try:
                 base_cooldown = max(base_cooldown, int(float(retry_after)))
-            except:
+            except Exception:
                 pass
-        # 指数退避：如果已冷却，延长冷却时间
         current = self._engine_cooldown.get(engine_url, 0)
         now = time.time()
         if current > now:
-            base_cooldown = int((current - now) * 2.5)  # 更激进的退避（2.5倍）
-
+            base_cooldown = int((current - now) * 2.5)
         self._engine_cooldown[engine_url] = now + base_cooldown
         return base_cooldown
+
+    def _set_all_engines_cooldown(self, retry_after=None):
+        """任一端点触发限流时，全端点一起冷却"""
+        cooldown = self._set_rate_limit_cooldown(retry_after)
+        now = time.time()
+        end_time = now + cooldown
+        for url in settings.JITO_ENGINE_URLS:
+            self._engine_cooldown[url] = end_time
+        return cooldown
 
     @staticmethod
     async def _post_json_rpc(engine_url: str, payload: dict, timeout: int = 10):
@@ -374,10 +383,10 @@ class JitoClient:
                 "params": [b58_txs]  # 所有交易打包在一起，确保原子执行
             }
 
-            # 6. 按优先级顺序尝试所有Jito端点
-            last_error = None
+            # 6. 按优先级尝试所有 Jito 端点，若有 429 则全端点一起冷却
+            got_rate_limited = False
+            retry_after_header = None
             for engine_url in settings.JITO_ENGINE_URLS:
-                # 检查端点是否在冷却中
                 now = time.time()
                 cooldown_until = self._engine_cooldown.get(engine_url, 0)
                 if now < cooldown_until:
@@ -389,49 +398,42 @@ class JitoClient:
                 status, data, headers = await self._post_json_rpc(engine_url, payload, timeout=15)
 
                 if status == 429:
-                    # 标记此端点冷却，但继续尝试下一个
-                    endpoint_cooldown = self._set_engine_cooldown(engine_url, headers.get("Retry-After"))
-                    logger.error(f"⚠️ Jito 端点 {engine_url} 触发限流，进入 {endpoint_cooldown} 秒冷却")
-                    # 同时触发全局冷却
-                    global_cooldown = self._set_rate_limit_cooldown(headers.get("Retry-After"))
-                    logger.warning(f"⏳ 同时触发全局冷却 {global_cooldown} 秒")
-                    last_error = "RATE_LIMITED"
-                    continue  # 立即尝试下一个端点
-
-                if status != 200:
-                    logger.error(f"❌ Jito 端点 {engine_url} 拒绝: {data.get('error') if isinstance(data, dict) else data}")
-                    last_error = None
-                    continue  # 尝试下一个端点
+                    logger.error(f"⚠️ 端点 {engine_url} 触发限流")
+                    got_rate_limited = True
+                    retry_after_header = retry_after_header or headers.get("Retry-After")
+                    continue
 
                 err = data.get("error") if isinstance(data, dict) else None
                 if err:
-                    msg = err.get("message", err) if isinstance(err, dict) else str(err)
-                    logger.error(f"❌ Jito 端点 {engine_url} JSON-RPC 错误: {msg}")
+                    err_msg = err.get("message", err) if isinstance(err, dict) else str(err)
+                    logger.error(f"❌ Jito 端点 {engine_url} 拒绝: {err_msg}")
 
-                    if "429" in str(msg).lower() or "rate" in str(msg).lower():
-                        # 标记此端点冷却，但继续尝试下一个
-                        endpoint_cooldown = self._set_engine_cooldown(engine_url, None)
-                        global_cooldown = self._set_rate_limit_cooldown()
-                        logger.warning(f"⏳ 根据错误信息触发限流冷却: 端点 {engine_url} 冷却 {endpoint_cooldown} 秒，全局冷却 {global_cooldown} 秒")
-                        last_error = "RATE_LIMITED"
-                        continue  # 立即尝试下一个端点
+                    if "429" in str(err_msg).lower() or "rate" in str(err_msg).lower():
+                        got_rate_limited = True
+                        continue
 
-                    last_error = None
-                    continue  # 尝试下一个端点
+                    # vote account 等 bundle 无效错误：不再尝试其他端点
+                    if "vote" in str(err_msg).lower() or "lock" in str(err_msg).lower():
+                        return "VOTE_ACCOUNT_LOCKED"
+                    continue
 
-                # 成功！返回 bundle_id
+                if status != 200:
+                    logger.error(f"❌ Jito 端点 {engine_url} HTTP {status}: {data}")
+                    continue
+
                 bundle_id = data.get("result") if isinstance(data, dict) else None
                 if bundle_id:
                     self._bundle_engine_map[bundle_id] = engine_url
                     logger.success(f"✅ 端点 {engine_url} 成功接受Bundle! Bundle ID: {bundle_id}")
                     return bundle_id
-                else:
-                    logger.warning(f"⚠️ 端点 {engine_url} 返回空 bundle_id")
-                    last_error = None
-                    continue  # 尝试下一个端点
 
-            # 所有端点都尝试失败
-            if last_error == "RATE_LIMITED":
+                logger.warning(f"⚠️ 端点 {engine_url} 返回空 bundle_id")
+                continue
+
+            # 若有端点触发限流，全端点一起冷却
+            if got_rate_limited:
+                cooldown = self._set_all_engines_cooldown(retry_after_header)
+                logger.warning(f"⏳ 全端点进入 {cooldown} 秒冷却")
                 return "RATE_LIMITED"
             return None
 

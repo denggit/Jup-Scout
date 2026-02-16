@@ -62,6 +62,13 @@ async def main():
     # --- 死循环：开始持续巡逻 ---
     while True:
         try:
+            # 限流冷却期间不扫描，直接等待冷却结束
+            rate_limit_wait = jito_client.get_rate_limit_wait_seconds()
+            if rate_limit_wait > 0:
+                logger.info(f"⏳ Jito 冷却中，剩余 {rate_limit_wait} 秒，暂停扫描...")
+                await asyncio.sleep(min(rate_limit_wait, 5))  # 每5秒检查一次，避免长时间阻塞
+                continue
+
             logger.info("🔎 正在扫描闭环套利机会 (USDC -> SOL -> USDC)...")
 
             # 使用check_arb_opportunity方法检查套利机会
