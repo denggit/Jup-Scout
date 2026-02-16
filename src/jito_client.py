@@ -14,6 +14,29 @@ from solana.rpc.async_api import AsyncClient
 from config.settings import settings
 
 
+def _rebuild_message_with_blockhash(orig_message, recent_blockhash):
+    """
+    用统一的 recent_blockhash 重建 message，保证 bundle 内所有 tx 同 blockhash。
+    Jupiter 返回的 tx 自带旧 blockhash，直接复用会导致 Jito 在一致性检查时拒绝 bundle。
+    仅替换 blockhash，完整保留：
+    - address_table_lookups（ALT）
+    - header（writable/readonly 标志）
+    - account_keys 顺序与 instructions
+    这样 Jito simulation 能正确识别 write lock，不会误报 tip 未 write-lock。
+    """
+    msg = getattr(orig_message, "value", orig_message)
+    if not isinstance(msg, MessageV0):
+        return orig_message
+    new_msg = MessageV0(
+        msg.header,
+        msg.account_keys,
+        recent_blockhash,
+        msg.instructions,
+        msg.address_table_lookups,
+    )
+    return new_msg
+
+
 class JitoClient:
     _url_iter = None
 
@@ -35,37 +58,36 @@ class JitoClient:
         :return: Bundle ID或错误信息
         """
         try:
-            # 1. 获取最新 Blockhash (所有交易必须使用相同的blockhash以确保原子性)
+            # 1. 先取统一的 recent_blockhash（bundle 内所有 tx 必须同 blockhash，否则 Jito 直接拒）
             async with AsyncClient(settings.RPC_URL) as rpc_client:
                 recent_blockhash = (await rpc_client.get_latest_blockhash()).value.blockhash
 
-            # 2. 解析并签署所有Jupiter交易
+            # 2. 解析 Jupiter 交易并用同一 blockhash 重建 message，再签署
             signed_txs = []
-            
-            # 处理第一个交易
+
+            def _parse_and_rebuild_swap(raw_tx_bytes, label="swap"):
+                tx = VersionedTransaction.from_bytes(raw_tx_bytes)
+                new_message = _rebuild_message_with_blockhash(tx.message, recent_blockhash)
+                return VersionedTransaction(new_message, [payer_keypair])
+
             try:
                 raw_tx_bytes = base64.b64decode(jupiter_tx_base64)
-                swap_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
-                # 重新签署交易，确保使用我们的密钥对
-                signed_swap_tx = VersionedTransaction(swap_tx.message, [payer_keypair])
+                signed_swap_tx = _parse_and_rebuild_swap(raw_tx_bytes, "第一个swap")
                 signed_txs.append(signed_swap_tx)
-                logger.debug("✅ 第一个swap交易解析并签署成功")
+                logger.debug("✅ 第一个swap交易解析并签署成功（已统一 blockhash）")
             except Exception as e:
                 logger.error(f"❌ 解析第一个交易失败: {e}")
                 import traceback
                 logger.error(traceback.format_exc())
                 return None
-            
-            # 处理额外的交易（用于原子套利：第二个swap）
+
             if additional_txs:
                 for idx, additional_tx_base64 in enumerate(additional_txs):
                     try:
                         additional_raw = base64.b64decode(additional_tx_base64)
-                        additional_tx = VersionedTransaction.from_bytes(additional_raw)
-                        # 重新签署，使用相同的blockhash确保原子性
-                        signed_additional_tx = VersionedTransaction(additional_tx.message, [payer_keypair])
+                        signed_additional_tx = _parse_and_rebuild_swap(additional_raw, f"额外交易 {idx+1}")
                         signed_txs.append(signed_additional_tx)
-                        logger.debug(f"✅ 额外交易 {idx+1} 解析并签署成功")
+                        logger.debug(f"✅ 额外交易 {idx+1} 解析并签署成功（已统一 blockhash）")
                     except Exception as e:
                         logger.error(f"❌ 解析额外交易 {idx+1} 失败: {e}")
                         import traceback
@@ -95,8 +117,8 @@ class JitoClient:
             ))
             tip_msg = MessageV0.try_compile(payer_keypair.pubkey(), [tip_ix], [], recent_blockhash)
             signed_tip_tx = VersionedTransaction(tip_msg, [payer_keypair])
-            # Jito 要求 bundle 中必须有一笔 tx 对 tip 账户 write lock，且常要求 tip 放第一笔
-            signed_txs.insert(0, signed_tip_tx)
+            # tip 必须是 bundle 最后一笔：[swap..., tip]。auction 顺序模拟时先执行 swap，tip 最后才能被正确计入 write-lock eligibility
+            signed_txs.append(signed_tip_tx)
 
             # 4. 安全序列化所有交易为Base58格式（Jito Bundle要求）
             try:

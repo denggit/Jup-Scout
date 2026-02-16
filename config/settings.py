@@ -41,7 +41,7 @@ class Settings:
     UNITS_PER_USDC = 1_000_000
 
     # 每次交易的USDC数量
-    AMOUNT_USDC = 100
+    AMOUNT_USDC = 10
 
     # --- ⚡️ 成本与风控配置 (你的核心要求) ---
     # 1. 假定 SOL 价格 (用于快速计算 Gas 和 小费成本)
