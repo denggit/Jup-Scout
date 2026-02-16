@@ -7,34 +7,128 @@ import base64
 from loguru import logger
 from solders.keypair import Keypair
 from solders.pubkey import Pubkey
+from solders.instruction import Instruction, AccountMeta, CompiledInstruction
 from solders.system_program import transfer, TransferParams
 from solders.message import MessageV0
 from solders.transaction import VersionedTransaction
+from solders.address_lookup_table_account import AddressLookupTableAccount
 from solana.rpc.async_api import AsyncClient
 from config.settings import settings
 
+# ALT 账户数据：前 56 字节为 meta，随后 4 字节为 address 数量 (u32 LE)，再 32*N 为地址
+_ALT_META_SIZE = 56
 
-def _rebuild_message_with_blockhash(orig_message, recent_blockhash):
+
+def _parse_alt_addresses(data: bytes) -> list:
+    if len(data) < _ALT_META_SIZE + 4:
+        return []
+    n = int.from_bytes(data[_ALT_META_SIZE : _ALT_META_SIZE + 4], "little")
+    start = _ALT_META_SIZE + 4
+    end = start + 32 * n
+    if len(data) < end:
+        return []
+    return [Pubkey.from_bytes(data[start + i * 32 : start + (i + 1) * 32]) for i in range(n)]
+
+
+async def _fetch_alt_account(rpc_client: AsyncClient, lookup_table_pubkey: Pubkey) -> list:
+    """从 RPC 拉取 ALT 账户并解析出 address 列表。"""
+    try:
+        resp = await rpc_client.get_account_info(lookup_table_pubkey, encoding="base64")
+        if not resp.value or not resp.value.data:
+            return []
+        data = base64.b64decode(resp.value.data)
+        return _parse_alt_addresses(data)
+    except Exception as e:
+        logger.debug(f"拉取 ALT {lookup_table_pubkey} 失败: {e}")
+        return []
+
+
+def _decompile_to_instructions(msg: MessageV0, full_account_keys: list) -> list:
+    """将 MessageV0 的 CompiledInstruction 反编译为 Instruction，用于 try_compile。"""
+    instructions = []
+    for ci in msg.instructions:
+        program_id_index = getattr(ci, "program_id_index", 0)
+        accounts_bytes = getattr(ci, "accounts", b"")
+        data = getattr(ci, "data", b"")
+        if program_id_index >= len(full_account_keys):
+            continue
+        program_id = full_account_keys[program_id_index]
+        account_metas = []
+        for i in accounts_bytes:
+            if i >= len(full_account_keys):
+                continue
+            is_signer = msg.is_signer(i) if hasattr(msg, "is_signer") else False
+            is_writable = msg.is_maybe_writable(i) if hasattr(msg, "is_maybe_writable") else True
+            account_metas.append(AccountMeta(full_account_keys[i], is_signer, is_writable))
+        instructions.append(Instruction(program_id, data, account_metas))
+    return instructions
+
+
+def _build_full_account_keys_and_alt_accounts(msg: MessageV0, alt_addresses_by_key: dict) -> tuple:
     """
-    用统一的 recent_blockhash 重建 message，保证 bundle 内所有 tx 同 blockhash。
-    Jupiter 返回的 tx 自带旧 blockhash，直接复用会导致 Jito 在一致性检查时拒绝 bundle。
-    仅替换 blockhash，完整保留：
-    - address_table_lookups（ALT）
-    - header（writable/readonly 标志）
-    - account_keys 顺序与 instructions
-    这样 Jito simulation 能正确识别 write lock，不会误报 tip 未 write-lock。
+    按 V0 顺序构建完整 account 列表，并构建 try_compile 所需的 AddressLookupTableAccount 列表。
+    返回 (full_account_keys, address_lookup_table_accounts)。
+    """
+    full_keys = list(msg.account_keys)
+    lookup_accounts = []
+    for lookup in msg.address_table_lookups:
+        key = lookup.account_key
+        addresses = alt_addresses_by_key.get(key)
+        if addresses is None:
+            addresses = []
+        lookup_accounts.append(AddressLookupTableAccount(key=key, addresses=addresses))
+        writable = getattr(lookup, "writable_indexes", None) or lookup.writable_indexes
+        readonly = getattr(lookup, "readonly_indexes", None) or lookup.readonly_indexes
+        for i in (list(writable) if isinstance(writable, bytes) else []):
+            if i < len(addresses):
+                full_keys.append(addresses[i])
+        for i in (list(readonly) if isinstance(readonly, bytes) else []):
+            if i < len(addresses):
+                full_keys.append(addresses[i])
+    return full_keys, lookup_accounts
+
+
+async def _rebuild_message_with_blockhash_async(rpc_client: AsyncClient, orig_message, recent_blockhash):
+    """
+    用统一 blockhash 重建 message，通过拉取 ALT + 反编译 + try_compile 正确保留 writable/readonly，
+    避免 Jito 报 "bundles cannot lock any vote accounts"。
     """
     msg = getattr(orig_message, "value", orig_message)
     if not isinstance(msg, MessageV0):
         return orig_message
-    new_msg = MessageV0(
-        msg.header,
-        msg.account_keys,
-        recent_blockhash,
-        msg.instructions,
-        msg.address_table_lookups,
-    )
-    return new_msg
+    payer = msg.account_keys[0]
+    alt_addresses_by_key = {}
+    for lookup in msg.address_table_lookups:
+        key = lookup.account_key
+        if key not in alt_addresses_by_key:
+            alt_addresses_by_key[key] = await _fetch_alt_account(rpc_client, key)
+    full_keys, address_lookup_table_accounts = _build_full_account_keys_and_alt_accounts(msg, alt_addresses_by_key)
+    instructions = _decompile_to_instructions(msg, full_keys)
+    if not instructions:
+        logger.warning("反编译得到 0 条 instruction，回退到裸构造")
+        return MessageV0(
+            msg.header,
+            msg.account_keys,
+            recent_blockhash,
+            msg.instructions,
+            msg.address_table_lookups,
+        )
+    try:
+        return MessageV0.try_compile(
+            payer,
+            instructions,
+            address_lookup_table_accounts,
+            recent_blockhash,
+        )
+    except Exception as e:
+        logger.warning(f"try_compile 失败 ({e})，回退到裸构造")
+        return MessageV0(
+            msg.header,
+            msg.account_keys,
+            recent_blockhash,
+            msg.instructions,
+            msg.address_table_lookups,
+        )
 
 
 class JitoClient:
@@ -58,41 +152,42 @@ class JitoClient:
         :return: Bundle ID或错误信息
         """
         try:
-            # 1. 先取统一的 recent_blockhash（bundle 内所有 tx 必须同 blockhash，否则 Jito 直接拒）
+            # 1. 取统一 blockhash，并在同一 RPC 会话内拉取 ALT、用 try_compile 重建 swap message
             async with AsyncClient(settings.RPC_URL) as rpc_client:
                 recent_blockhash = (await rpc_client.get_latest_blockhash()).value.blockhash
 
-            # 2. 解析 Jupiter 交易并用同一 blockhash 重建 message，再签署
-            signed_txs = []
+                signed_txs = []
 
-            def _parse_and_rebuild_swap(raw_tx_bytes, label="swap"):
-                tx = VersionedTransaction.from_bytes(raw_tx_bytes)
-                new_message = _rebuild_message_with_blockhash(tx.message, recent_blockhash)
-                return VersionedTransaction(new_message, [payer_keypair])
+                async def _parse_and_rebuild_swap(raw_tx_bytes):
+                    tx = VersionedTransaction.from_bytes(raw_tx_bytes)
+                    new_message = await _rebuild_message_with_blockhash_async(
+                        rpc_client, tx.message, recent_blockhash
+                    )
+                    return VersionedTransaction(new_message, [payer_keypair])
 
-            try:
-                raw_tx_bytes = base64.b64decode(jupiter_tx_base64)
-                signed_swap_tx = _parse_and_rebuild_swap(raw_tx_bytes, "第一个swap")
-                signed_txs.append(signed_swap_tx)
-                logger.debug("✅ 第一个swap交易解析并签署成功（已统一 blockhash）")
-            except Exception as e:
-                logger.error(f"❌ 解析第一个交易失败: {e}")
-                import traceback
-                logger.error(traceback.format_exc())
-                return None
+                try:
+                    raw_tx_bytes = base64.b64decode(jupiter_tx_base64)
+                    signed_swap_tx = await _parse_and_rebuild_swap(raw_tx_bytes)
+                    signed_txs.append(signed_swap_tx)
+                    logger.debug("✅ 第一个swap交易解析并签署成功（已统一 blockhash + try_compile）")
+                except Exception as e:
+                    logger.error(f"❌ 解析第一个交易失败: {e}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    return None
 
-            if additional_txs:
-                for idx, additional_tx_base64 in enumerate(additional_txs):
-                    try:
-                        additional_raw = base64.b64decode(additional_tx_base64)
-                        signed_additional_tx = _parse_and_rebuild_swap(additional_raw, f"额外交易 {idx+1}")
-                        signed_txs.append(signed_additional_tx)
-                        logger.debug(f"✅ 额外交易 {idx+1} 解析并签署成功（已统一 blockhash）")
-                    except Exception as e:
-                        logger.error(f"❌ 解析额外交易 {idx+1} 失败: {e}")
-                        import traceback
-                        logger.error(traceback.format_exc())
-                        return None
+                if additional_txs:
+                    for idx, additional_tx_base64 in enumerate(additional_txs):
+                        try:
+                            additional_raw = base64.b64decode(additional_tx_base64)
+                            signed_additional_tx = await _parse_and_rebuild_swap(additional_raw)
+                            signed_txs.append(signed_additional_tx)
+                            logger.debug(f"✅ 额外交易 {idx+1} 解析并签署成功（已统一 blockhash + try_compile）")
+                        except Exception as e:
+                            logger.error(f"❌ 解析额外交易 {idx+1} 失败: {e}")
+                            import traceback
+                            logger.error(traceback.format_exc())
+                            return None
 
             # 3. 构建小费交易 (Tip)，并选一个可解析的 tip 账户（避免 Invalid Base58）
             tip_pubkey = None
