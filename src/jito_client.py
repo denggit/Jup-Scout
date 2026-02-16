@@ -180,7 +180,7 @@ class JitoClient:
 
     def _set_engine_cooldown(self, engine_url, retry_after=None):
         """标记特定端点进入冷却"""
-        base_cooldown = 45
+        base_cooldown = 30
         if retry_after:
             try:
                 base_cooldown = max(base_cooldown, int(float(retry_after)))
@@ -215,7 +215,7 @@ class JitoClient:
             retry_after = int(float(retry_after_header)) if retry_after_header else 0
         except Exception:
             retry_after = 0
-        cooldown = max(45, retry_after)  # 从30秒增加到45秒
+        cooldown = max(30, retry_after)  # 30秒
         self._rate_limited_until = max(self._rate_limited_until, time.time() + cooldown)
         return cooldown
 
@@ -383,14 +383,14 @@ class JitoClient:
                 "params": [b58_txs]  # 所有交易打包在一起，确保原子执行
             }
 
-            # 6. 按优先级尝试所有 Jito 端点，若有 429 则全端点一起冷却
+            # 6. 按优先级尝试端点；仅对 429/限流 换端点重试，bundle 无效类错误不再发到其他端点
             got_rate_limited = False
             retry_after_header = None
             for engine_url in settings.JITO_ENGINE_URLS:
                 now = time.time()
                 cooldown_until = self._engine_cooldown.get(engine_url, 0)
-                if now < cooldown_until:
-                    remaining = int(cooldown_until - now)
+                remaining = max(0, int(cooldown_until - now + 0.5))  # 四舍五入，避免剩余 0.x 秒仍被跳过
+                if remaining > 0:
                     logger.info(f"⏳ 端点 {engine_url} 冷却中，剩余 {remaining} 秒，跳过")
                     continue
 
@@ -406,15 +406,17 @@ class JitoClient:
                 err = data.get("error") if isinstance(data, dict) else None
                 if err:
                     err_msg = err.get("message", err) if isinstance(err, dict) else str(err)
+                    err_str = str(err_msg).lower()
                     logger.error(f"❌ Jito 端点 {engine_url} 拒绝: {err_msg}")
 
-                    if "429" in str(err_msg).lower() or "rate" in str(err_msg).lower():
+                    if "429" in err_str or "rate" in err_str:
                         got_rate_limited = True
                         continue
-
-                    # vote account 等 bundle 无效错误：不再尝试其他端点
-                    if "vote" in str(err_msg).lower() or "lock" in str(err_msg).lower():
-                        return "VOTE_ACCOUNT_LOCKED"
+                    # bundle 无效（vote、simulation failed 等）：同一 bundle 不再发到其他端点
+                    if "vote" in err_str or "lock" in err_str or "simulation" in err_str:
+                        if "vote" in err_str or "lock" in err_str:
+                            return "VOTE_ACCOUNT_LOCKED"
+                        return None
                     continue
 
                 if status != 200:
@@ -430,7 +432,6 @@ class JitoClient:
                 logger.warning(f"⚠️ 端点 {engine_url} 返回空 bundle_id")
                 continue
 
-            # 若有端点触发限流，全端点一起冷却
             if got_rate_limited:
                 cooldown = self._set_all_engines_cooldown(retry_after_header)
                 logger.warning(f"⏳ 全端点进入 {cooldown} 秒冷却")
