@@ -7,14 +7,12 @@
 @Description: 
 """
 import asyncio
-import time
 import random
 
 import httpx
 from loguru import logger
-
-from solders.pubkey import Pubkey
 from solana.rpc.async_api import AsyncClient
+from solders.pubkey import Pubkey
 
 from config.settings import settings
 from src.ata_utils import ensure_atas_for_path, get_ata_address, ata_exists, ensure_ata_exists
@@ -105,10 +103,11 @@ async def main():
             # 检查净利润是否满足最低要求
             net_profit = arb_result['net_profit_usdc']
             gross_profit = arb_result['gross_profit_usdc']
-            
+
             # 调试日志：显示详细的利润信息
             logger.debug(f"📊 利润分析: 净利润=${net_profit:.6f}, 最低要求=${settings.MIN_NET_PROFIT_USDC:.6f}")
-            logger.debug(f"   判断条件: net_profit > MIN_NET_PROFIT_USDC => {net_profit:.6f} > {settings.MIN_NET_PROFIT_USDC:.6f} = {net_profit > settings.MIN_NET_PROFIT_USDC}")
+            logger.debug(
+                f"   判断条件: net_profit > MIN_NET_PROFIT_USDC => {net_profit:.6f} > {settings.MIN_NET_PROFIT_USDC:.6f} = {net_profit > settings.MIN_NET_PROFIT_USDC}")
 
             # 关键：只有净利润大于最低要求时才执行套利（确保不会亏损）
             if net_profit > settings.MIN_NET_PROFIT_USDC:
@@ -142,7 +141,8 @@ async def main():
                         logger.warning("🔄 Quote 含 closeAccount，reject（非 pure swap）")
                         swap_txs = None
                         break
-                    logger.warning(f"🔄 第 {idx + 1} 腿含 create ATA（mints={[str(m) for m in mints]}），检查 ATA 并可能重新 quote")
+                    logger.warning(
+                        f"🔄 第 {idx + 1} 腿含 create ATA（mints={[str(m) for m in mints]}），检查 ATA 并可能重新 quote")
                     async with AsyncClient(settings.RPC_URL) as rpc:
                         for m in mints:
                             ata = get_ata_address(settings.PUB_KEY, m)

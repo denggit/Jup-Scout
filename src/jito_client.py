@@ -1,19 +1,20 @@
 # src/jito_client.py
-import base58
-import itertools
-import aiohttp
-import random
 import base64
+import random
 import time
+
+import aiohttp
+import base58
 from loguru import logger
-from solders.keypair import Keypair
-from solders.pubkey import Pubkey
-from solders.instruction import Instruction, AccountMeta, CompiledInstruction
-from solders.system_program import transfer, TransferParams
-from solders.message import MessageV0
-from solders.transaction import VersionedTransaction
-from solders.address_lookup_table_account import AddressLookupTableAccount
 from solana.rpc.async_api import AsyncClient
+from solders.address_lookup_table_account import AddressLookupTableAccount
+from solders.instruction import Instruction, AccountMeta
+from solders.keypair import Keypair
+from solders.message import MessageV0
+from solders.pubkey import Pubkey
+from solders.system_program import transfer, TransferParams
+from solders.transaction import VersionedTransaction
+
 from config.settings import settings
 
 # ALT 账户数据：前 56 字节为 meta，随后 4 字节为 address 数量 (u32 LE)，再 32*N 为地址
@@ -23,12 +24,12 @@ _ALT_META_SIZE = 56
 def _parse_alt_addresses(data: bytes) -> list:
     if len(data) < _ALT_META_SIZE + 4:
         return []
-    n = int.from_bytes(data[_ALT_META_SIZE : _ALT_META_SIZE + 4], "little")
+    n = int.from_bytes(data[_ALT_META_SIZE: _ALT_META_SIZE + 4], "little")
     start = _ALT_META_SIZE + 4
     end = start + 32 * n
     if len(data) < end:
         return []
-    return [Pubkey.from_bytes(data[start + i * 32 : start + (i + 1) * 32]) for i in range(n)]
+    return [Pubkey.from_bytes(data[start + i * 32: start + (i + 1) * 32]) for i in range(n)]
 
 
 # Vote 程序 ID：归属该程序的 account 均为 vote account，Jito 禁止锁定为 writable
@@ -59,7 +60,7 @@ async def _fetch_vote_account_set(rpc_client: AsyncClient, pubkeys: list) -> set
         # RPC 单次请求数量有限，分批查询
         batch_size = 100
         for start in range(0, len(pubkeys), batch_size):
-            batch = pubkeys[start : start + batch_size]
+            batch = pubkeys[start: start + batch_size]
             resp = await rpc_client.get_multiple_accounts(batch)
             value = getattr(resp, "value", None) or []
             for i, acc in enumerate(value):
@@ -88,10 +89,10 @@ async def _fetch_alt_account(rpc_client: AsyncClient, lookup_table_pubkey: Pubke
 
 
 def _decompile_to_instructions(
-    msg: MessageV0,
-    full_account_keys: list,
-    is_writable_by_index: dict,
-    vote_account_pubkeys: set = None,
+        msg: MessageV0,
+        full_account_keys: list,
+        is_writable_by_index: dict,
+        vote_account_pubkeys: set = None,
 ) -> list:
     """将 MessageV0 反编译为 Instruction；归属 Vote 程序的 account 强制 readonly。"""
     vote_account_pubkeys = vote_account_pubkeys or set()
@@ -175,7 +176,8 @@ async def _rebuild_message_with_blockhash_async(rpc_client: AsyncClient, orig_me
         key = lookup.account_key
         if key not in alt_addresses_by_key:
             alt_addresses_by_key[key] = await _fetch_alt_account(rpc_client, key)
-    full_keys, address_lookup_table_accounts, is_writable_by_index = _build_full_account_keys_and_alt_accounts(msg, alt_addresses_by_key)
+    full_keys, address_lookup_table_accounts, is_writable_by_index = _build_full_account_keys_and_alt_accounts(msg,
+                                                                                                               alt_addresses_by_key)
     # 通过 RPC 识别归属 Vote 程序的 account（验证者 vote 账户），反编译时强制只读
     unique_keys = list(dict.fromkeys(full_keys))
     vote_account_pubkeys = await _fetch_vote_account_set(rpc_client, unique_keys)
@@ -308,9 +310,9 @@ class JitoClient:
                             additional_raw = base64.b64decode(additional_tx_base64)
                             signed_additional_tx = await _parse_and_rebuild_swap(additional_raw)
                             signed_txs.append(signed_additional_tx)
-                            logger.debug(f"✅ 额外交易 {idx+1} 解析并签署成功（已统一 blockhash + try_compile）")
+                            logger.debug(f"✅ 额外交易 {idx + 1} 解析并签署成功（已统一 blockhash + try_compile）")
                         except Exception as e:
-                            logger.error(f"❌ 解析额外交易 {idx+1} 失败: {e}")
+                            logger.error(f"❌ 解析额外交易 {idx + 1} 失败: {e}")
                             import traceback
                             logger.error(traceback.format_exc())
                             return None
@@ -335,7 +337,7 @@ class JitoClient:
             tip_ix = transfer(TransferParams(
                 from_pubkey=payer_keypair.pubkey(),
                 to_pubkey=tip_pubkey,
-                lamports=int(self.tip_amount * 10**9)
+                lamports=int(self.tip_amount * 10 ** 9)
             ))
             tip_msg = MessageV0.try_compile(payer_keypair.pubkey(), [tip_ix], [], recent_blockhash)
             signed_tip_tx = VersionedTransaction(tip_msg, [payer_keypair])
@@ -349,9 +351,9 @@ class JitoClient:
                     if _is_vote_program(key):
                         is_writable = msg.is_maybe_writable(i) if hasattr(msg, "is_maybe_writable") else False
                         if is_writable:
-                            logger.error(f"❌ 交易 {idx+1} 锁定 vote 相关账户 {key} 为 writable，拒绝发送")
+                            logger.error(f"❌ 交易 {idx + 1} 锁定 vote 相关账户 {key} 为 writable，拒绝发送")
                             return "VOTE_ACCOUNT_LOCKED"
-                logger.debug(f"✅ 交易 {idx+1} 验证通过，无 vote 相关 writable")
+                logger.debug(f"✅ 交易 {idx + 1} 验证通过，无 vote 相关 writable")
 
             # 4.1.1 提交前硬校验：任一笔触碰 Vote 程序则直接丢弃 bundle，不提交
             for i, tx in enumerate(signed_txs):
@@ -366,53 +368,54 @@ class JitoClient:
                     try:
                         # VersionedTransaction序列化：尝试多种方式确保正确序列化
                         tx_bytes = None
-                        
+
                         # 方法1：直接转换为bytes（solders的标准方式）
                         try:
                             tx_bytes = bytes(signed_tx)
                             if len(tx_bytes) > 0:
-                                logger.debug(f"✅ 交易 {idx+1} 使用方法1序列化成功，长度: {len(tx_bytes)}")
+                                logger.debug(f"✅ 交易 {idx + 1} 使用方法1序列化成功，长度: {len(tx_bytes)}")
                         except Exception as e1:
-                            logger.warning(f"⚠️ 交易 {idx+1} 方法1序列化失败: {e1}")
-                            
+                            logger.warning(f"⚠️ 交易 {idx + 1} 方法1序列化失败: {e1}")
+
                             # 方法2：尝试使用serialize方法（如果存在）
                             if hasattr(signed_tx, 'serialize'):
                                 try:
                                     tx_bytes = signed_tx.serialize()
-                                    logger.debug(f"✅ 交易 {idx+1} 使用方法2序列化成功，长度: {len(tx_bytes)}")
+                                    logger.debug(f"✅ 交易 {idx + 1} 使用方法2序列化成功，长度: {len(tx_bytes)}")
                                 except Exception as e2:
-                                    logger.warning(f"⚠️ 交易 {idx+1} 方法2序列化失败: {e2}")
-                            
+                                    logger.warning(f"⚠️ 交易 {idx + 1} 方法2序列化失败: {e2}")
+
                             # 方法3：尝试使用to_bytes方法（如果存在）
                             if tx_bytes is None and hasattr(signed_tx, 'to_bytes'):
                                 try:
                                     tx_bytes = signed_tx.to_bytes()
-                                    logger.debug(f"✅ 交易 {idx+1} 使用方法3序列化成功，长度: {len(tx_bytes)}")
+                                    logger.debug(f"✅ 交易 {idx + 1} 使用方法3序列化成功，长度: {len(tx_bytes)}")
                                 except Exception as e3:
-                                    logger.warning(f"⚠️ 交易 {idx+1} 方法3序列化失败: {e3}")
-                        
+                                    logger.warning(f"⚠️ 交易 {idx + 1} 方法3序列化失败: {e3}")
+
                         if tx_bytes is None or len(tx_bytes) == 0:
-                            logger.error(f"❌ 交易 {idx+1} 所有序列化方法都失败")
+                            logger.error(f"❌ 交易 {idx + 1} 所有序列化方法都失败")
                             return None
-                        
+
                         # Base58编码（确保为 bytes，避免异常编码）
                         try:
                             raw = bytes(tx_bytes) if not isinstance(tx_bytes, bytes) else tx_bytes
                             b58_tx = base58.b58encode(raw).decode("utf-8")
                             if not b58_tx or len(b58_tx) < 100:
-                                logger.error(f"❌ 交易 {idx+1} Base58编码结果异常，长度: {len(b58_tx)}")
+                                logger.error(f"❌ 交易 {idx + 1} Base58编码结果异常，长度: {len(b58_tx)}")
                                 return None
                             b58_txs.append(b58_tx)
-                            logger.debug(f"✅ 交易 {idx+1} Base58编码成功，长度: {len(b58_tx)}")
+                            logger.debug(f"✅ 交易 {idx + 1} Base58编码成功，长度: {len(b58_tx)}")
                         except Exception as e:
-                            logger.error(f"❌ 交易 {idx+1} Base58编码失败: {type(e).__name__}: {e}")
-                            logger.error(f"   tx_bytes 长度: {len(tx_bytes) if tx_bytes else 0}, 前32字节: {tx_bytes[:32].hex() if tx_bytes and len(tx_bytes) >= 32 else 'N/A'}")
+                            logger.error(f"❌ 交易 {idx + 1} Base58编码失败: {type(e).__name__}: {e}")
+                            logger.error(
+                                f"   tx_bytes 长度: {len(tx_bytes) if tx_bytes else 0}, 前32字节: {tx_bytes[:32].hex() if tx_bytes and len(tx_bytes) >= 32 else 'N/A'}")
                             import traceback
                             logger.error(traceback.format_exc())
                             return None
-                            
+
                     except Exception as e:
-                        logger.error(f"❌ 交易 {idx+1} 处理过程异常: {e}")
+                        logger.error(f"❌ 交易 {idx + 1} 处理过程异常: {e}")
                         logger.error(f"   交易类型: {type(signed_tx)}")
                         import traceback
                         logger.error(traceback.format_exc())
@@ -534,7 +537,8 @@ class JitoClient:
                 inflight_result = inflight_data.get("result", {})
                 if isinstance(inflight_result, dict):
                     inflight_value = inflight_result.get("value")
-                    if inflight_value and isinstance(inflight_value, list) and len(inflight_value) > 0 and isinstance(inflight_value[0], dict):
+                    if inflight_value and isinstance(inflight_value, list) and len(inflight_value) > 0 and isinstance(
+                            inflight_value[0], dict):
                         merged.update(inflight_value[0])
 
             return merged or None

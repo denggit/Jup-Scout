@@ -1,6 +1,7 @@
 # src/jupiter.py
 import base64
 import itertools
+
 import aiohttp
 from loguru import logger
 from solders.message import MessageV0
@@ -185,8 +186,8 @@ class JupiterClient:
         profit_units = final_usdc_units - invest_amount_usdc_units
         gross_profit_usdc = profit_units / settings.UNITS_PER_USDC
         total_cost_usdc = (
-            settings.JITO_TIP_AMOUNT_SOL + settings.ESTIMATED_GAS_SOL
-        ) * settings.FIXED_SOL_PRICE_USDC
+                                  settings.JITO_TIP_AMOUNT_SOL + settings.ESTIMATED_GAS_SOL
+                          ) * settings.FIXED_SOL_PRICE_USDC
         net_profit_usdc = gross_profit_usdc - total_cost_usdc
 
         logger.info(f"  --> 最终: {final_usdc_units / settings.UNITS_PER_USDC:.4f} USDC")

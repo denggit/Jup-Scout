@@ -8,6 +8,7 @@ Jup-Scout 连接测试脚本
 import asyncio
 import os
 import sys
+
 import aiohttp
 from loguru import logger
 
@@ -47,7 +48,7 @@ async def test_environment():
         return False
     print(f"✅ Jito 端点: {len(settings.JITO_ENGINE_URLS)} 个")
     for i, url in enumerate(settings.JITO_ENGINE_URLS):
-        print(f"   {i+1}. {url}")
+        print(f"   {i + 1}. {url}")
 
     # 检查代币地址
     print(f"✅ SOL Mint: {settings.SOL_MINT}")
@@ -170,15 +171,15 @@ async def test_jito_client_initialization():
 
 
 async def test_vote_account_detection():
-    """测试vote account检测功能"""
+    """测试 vote program 检测功能（_is_vote_program / tx_touches_vote_account）"""
     print("\n🔒 测试vote account检测功能...")
     from solders.pubkey import Pubkey
-    from src.jito_client import _is_vote_account
+    from src.jito_client import _is_vote_program, VOTE_PROGRAM_ID_STR
 
-    # 测试已知的vote account前缀
+    # 当前只检测 Vote 程序 ID 本身（Vote111...111），不检测 112 变体
     test_cases = [
-        ("Vote111111111111111111111111111111111111111", True),
-        ("Vote111111111111111111111111111111111111112", True),
+        (VOTE_PROGRAM_ID_STR, True),  # Vote program
+        ("Vote111111111111111111111111111111111111112", False),
         ("So11111111111111111111111111111111111111112", False),  # SOL mint
         ("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", False),  # USDC mint
         ("96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5", False),  # Jito tip account
@@ -188,7 +189,7 @@ async def test_vote_account_detection():
     for addr_str, expected in test_cases:
         try:
             pubkey = Pubkey.from_string(addr_str)
-            result = _is_vote_account(pubkey)
+            result = _is_vote_program(pubkey)
             status = "✅" if result == expected else "❌"
             print(f"   {status} {addr_str[:20]}...: 预期={expected}, 实际={result}")
             if result != expected:

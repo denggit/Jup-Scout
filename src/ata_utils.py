@@ -3,11 +3,11 @@
 Stage 0：账户准备。确保路径所需 ATA 常驻，不 close、不 reclaim rent。
 """
 from loguru import logger
+from solana.rpc.async_api import AsyncClient
 from solders.instruction import Instruction, AccountMeta
 from solders.message import MessageV0
 from solders.pubkey import Pubkey
 from solders.transaction import VersionedTransaction
-from solana.rpc.async_api import AsyncClient
 
 ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
