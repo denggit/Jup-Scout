@@ -178,10 +178,13 @@ async def _rebuild_message_with_blockhash_async(rpc_client: AsyncClient, orig_me
             alt_addresses_by_key[key] = await _fetch_alt_account(rpc_client, key)
     full_keys, address_lookup_table_accounts, is_writable_by_index = _build_full_account_keys_and_alt_accounts(msg,
                                                                                                                alt_addresses_by_key)
-    # 通过 RPC 识别归属 Vote 程序的 account（验证者 vote 账户），反编译时强制只读
+    # 通过 RPC 识别归属 Vote 程序的 account（验证者 vote 账户）
     unique_keys = list(dict.fromkeys(full_keys))
     vote_account_pubkeys = await _fetch_vote_account_set(rpc_client, unique_keys)
-    instructions = _decompile_to_instructions(msg, full_keys, is_writable_by_index, vote_account_pubkeys)
+    # Jito 仍会拒含 vote account 的 bundle，最稳做法：任一笔触及 vote account 则整包不提交
+    if vote_account_pubkeys:
+        raise ValueError(f"tx touches vote account(s): {[str(p) for p in list(vote_account_pubkeys)[:3]]}")
+    instructions = _decompile_to_instructions(msg, full_keys, is_writable_by_index, set())
     if not instructions:
         logger.error("反编译得到 0 条 instruction，拒绝使用裸构造（会导致 vote account lock）")
         raise ValueError("decompile failed: no instructions")
@@ -298,6 +301,11 @@ class JitoClient:
                     signed_swap_tx = await _parse_and_rebuild_swap(raw_tx_bytes)
                     signed_txs.append(signed_swap_tx)
                     logger.debug("✅ 第一个swap交易解析并签署成功（已统一 blockhash + try_compile）")
+                except ValueError as e:
+                    if "tx touches vote account" in str(e):
+                        logger.warning(f"⏭️ 第 1 腿触及 vote account，跳过此 bundle: {e}")
+                        return "VOTE_ACCOUNT_LOCKED"
+                    raise
                 except Exception as e:
                     logger.error(f"❌ 解析第一个交易失败: {e}")
                     import traceback
@@ -311,6 +319,11 @@ class JitoClient:
                             signed_additional_tx = await _parse_and_rebuild_swap(additional_raw)
                             signed_txs.append(signed_additional_tx)
                             logger.debug(f"✅ 额外交易 {idx + 1} 解析并签署成功（已统一 blockhash + try_compile）")
+                        except ValueError as e:
+                            if "tx touches vote account" in str(e):
+                                logger.warning(f"⏭️ 第 {idx + 2} 腿触及 vote account，跳过此 bundle: {e}")
+                                return "VOTE_ACCOUNT_LOCKED"
+                            raise
                         except Exception as e:
                             logger.error(f"❌ 解析额外交易 {idx + 1} 失败: {e}")
                             import traceback
