@@ -153,30 +153,28 @@ async def _rebuild_message_with_blockhash_async(rpc_client: AsyncClient, orig_me
 
 
 class JitoClient:
-    _url_iter = None
 
     def __init__(self):
         self.tip_amount = settings.JITO_TIP_AMOUNT_SOL
         self._rate_limited_until = 0.0
         self._bundle_engine_map = {}
         self._engine_cooldown = {}  # 端点冷却时间记录 {url: 冷却结束时间戳}
-        if JitoClient._url_iter is None:
-            JitoClient._url_iter = itertools.cycle(settings.JITO_ENGINE_URLS)
 
     def _get_engine_url(self):
-        """获取可用端点，跳过冷却中的"""
+        """获取第一个不在冷却中的端点（按优先级顺序）"""
         now = time.time()
-        # 尝试所有端点，找到第一个不在冷却中的
-        for _ in range(len(settings.JITO_ENGINE_URLS)):
-            url = next(JitoClient._url_iter)
-            cooldown_until = self._engine_cooldown.get(url, 0)
+        # 按优先级顺序检查所有端点
+        for engine_url in settings.JITO_ENGINE_URLS:
+            cooldown_until = self._engine_cooldown.get(engine_url, 0)
             if now >= cooldown_until:
-                return url
-        # 所有端点都在冷却，返回冷却时间最短的
+                return engine_url
+
+        # 所有端点都在冷却中，返回冷却时间最短的
         if self._engine_cooldown:
             return min(self._engine_cooldown.items(), key=lambda x: x[1])[0]
-        # 回退到简单轮询
-        return next(JitoClient._url_iter)
+
+        # 回退到第一个端点
+        return settings.JITO_ENGINE_URLS[0] if settings.JITO_ENGINE_URLS else ""
 
     def _set_engine_cooldown(self, engine_url, retry_after=None):
         """标记特定端点进入冷却"""
@@ -376,35 +374,66 @@ class JitoClient:
                 "params": [b58_txs]  # 所有交易打包在一起，确保原子执行
             }
 
-            # 6. 发送请求（轮询 Jito 端点以降低 429）
-            engine_url = self._get_engine_url()
-            status, data, headers = await self._post_json_rpc(engine_url, payload, timeout=15)
-            if status == 429:
-                # 标记特定端点冷却
-                endpoint_cooldown = self._set_engine_cooldown(engine_url, headers.get("Retry-After"))
-                logger.error(f"⚠️ Jito 端点 {engine_url} 触发限流，进入 {endpoint_cooldown} 秒冷却")
-                # 全局冷却作为后备
-                global_cooldown = self._set_rate_limit_cooldown(headers.get("Retry-After"))
-                logger.warning(f"⏳ 同时触发全局冷却 {global_cooldown} 秒")
+            # 6. 按优先级顺序尝试所有Jito端点
+            last_error = None
+            for engine_url in settings.JITO_ENGINE_URLS:
+                # 检查端点是否在冷却中
+                now = time.time()
+                cooldown_until = self._engine_cooldown.get(engine_url, 0)
+                if now < cooldown_until:
+                    remaining = int(cooldown_until - now)
+                    logger.info(f"⏳ 端点 {engine_url} 冷却中，剩余 {remaining} 秒，跳过")
+                    continue
+
+                logger.info(f"📡 尝试使用端点: {engine_url}")
+                status, data, headers = await self._post_json_rpc(engine_url, payload, timeout=15)
+
+                if status == 429:
+                    # 标记此端点冷却，但继续尝试下一个
+                    endpoint_cooldown = self._set_engine_cooldown(engine_url, headers.get("Retry-After"))
+                    logger.error(f"⚠️ Jito 端点 {engine_url} 触发限流，进入 {endpoint_cooldown} 秒冷却")
+                    # 同时触发全局冷却
+                    global_cooldown = self._set_rate_limit_cooldown(headers.get("Retry-After"))
+                    logger.warning(f"⏳ 同时触发全局冷却 {global_cooldown} 秒")
+                    last_error = "RATE_LIMITED"
+                    continue  # 立即尝试下一个端点
+
+                if status != 200:
+                    logger.error(f"❌ Jito 端点 {engine_url} 拒绝: {data.get('error') if isinstance(data, dict) else data}")
+                    last_error = None
+                    continue  # 尝试下一个端点
+
+                err = data.get("error") if isinstance(data, dict) else None
+                if err:
+                    msg = err.get("message", err) if isinstance(err, dict) else str(err)
+                    logger.error(f"❌ Jito 端点 {engine_url} JSON-RPC 错误: {msg}")
+
+                    if "429" in str(msg).lower() or "rate" in str(msg).lower():
+                        # 标记此端点冷却，但继续尝试下一个
+                        endpoint_cooldown = self._set_engine_cooldown(engine_url, None)
+                        global_cooldown = self._set_rate_limit_cooldown()
+                        logger.warning(f"⏳ 根据错误信息触发限流冷却: 端点 {engine_url} 冷却 {endpoint_cooldown} 秒，全局冷却 {global_cooldown} 秒")
+                        last_error = "RATE_LIMITED"
+                        continue  # 立即尝试下一个端点
+
+                    last_error = None
+                    continue  # 尝试下一个端点
+
+                # 成功！返回 bundle_id
+                bundle_id = data.get("result") if isinstance(data, dict) else None
+                if bundle_id:
+                    self._bundle_engine_map[bundle_id] = engine_url
+                    logger.success(f"✅ 端点 {engine_url} 成功接受Bundle! Bundle ID: {bundle_id}")
+                    return bundle_id
+                else:
+                    logger.warning(f"⚠️ 端点 {engine_url} 返回空 bundle_id")
+                    last_error = None
+                    continue  # 尝试下一个端点
+
+            # 所有端点都尝试失败
+            if last_error == "RATE_LIMITED":
                 return "RATE_LIMITED"
-            if status != 200:
-                logger.error(f"❌ Jito 拒绝: {data.get('error') if isinstance(data, dict) else data}")
-                return None
-            err = data.get("error") if isinstance(data, dict) else None
-            if err:
-                msg = err.get("message", err) if isinstance(err, dict) else str(err)
-                logger.error(f"❌ Jito JSON-RPC 错误: {msg}")
-                if "429" in str(msg).lower() or "rate" in str(msg).lower():
-                    # 标记特定端点冷却
-                    endpoint_cooldown = self._set_engine_cooldown(engine_url, None)
-                    global_cooldown = self._set_rate_limit_cooldown()
-                    logger.warning(f"⏳ 根据错误信息触发限流冷却: 端点 {engine_url} 冷却 {endpoint_cooldown} 秒，全局冷却 {global_cooldown} 秒")
-                    return "RATE_LIMITED"
-                return None
-            bundle_id = data.get("result") if isinstance(data, dict) else None
-            if bundle_id:
-                self._bundle_engine_map[bundle_id] = engine_url
-            return bundle_id
+            return None
 
         except Exception as e:
             logger.error(f"💥 Jito 模块异常: {str(e)}")

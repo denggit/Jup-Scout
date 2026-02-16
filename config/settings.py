@@ -67,11 +67,13 @@ class Settings:
     # 示例 .env: JITO_ENGINE_URLS=https://mainnet.block-engine.jito.wtf/api/v1/bundles;https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles;https://am.mainnet.block-engine.jito.wtf/api/v1/bundles
     _jito_urls_raw = os.getenv("JITO_ENGINE_URLS", "")
     JITO_ENGINE_URLS = [u.strip() for u in _jito_urls_raw.split(";") if u.strip()]
-    # 默认端点池（如果未配置环境变量）
+    # 默认端点池（如果未配置环境变量）- 按优先级顺序
     if not JITO_ENGINE_URLS:
         JITO_ENGINE_URLS = [
-            # "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
-            "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles"
+            "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles",  # 第一优先级：纽约（延迟最低）
+            "https://mainnet.block-engine.jito.wtf/api/v1/bundles",      # 第二优先级：主节点
+            "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles",  # 第三优先级：法兰克福
+            "https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles"       # 第四优先级：东京（兜底）
         ]
     JITO_ENGINE_URL = JITO_ENGINE_URLS[0]  # 兼容旧代码
 
