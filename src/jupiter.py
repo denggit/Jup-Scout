@@ -93,20 +93,23 @@ class JupiterClient:
             return out
 
     async def get_quote(self, input_mint, output_mint, amount):
+        # 1. 定义要屏蔽的 DEX 列表
+        exclude_list = [
+            "Jito",
+            "Sanctum",
+            "Stake Pool",
+            "Lido",
+            "Marinade",
+            "Socean"
+        ]
+
         params = {
             "inputMint": input_mint,
             "outputMint": output_mint,
             "amount": int(amount),
             "slippageBps": 50,
-            # 🔥【新增】这里是关键！屏蔽掉所有质押池 🔥
-            "excludeDexes": [
-                "Jito",  # 罪魁祸首：Jito Stake Pool
-                "Sanctum",  # 常见杀手：Sanctum Infinity
-                "Stake Pool",  # 通用质押池
-                "Lido",
-                "Marinade",
-                "Socean"
-            ]
+            # 🔥【修正点】必须转成字符串！不能传列表！🔥
+            "excludeDexes": ",".join(exclude_list)
         }
 
         async with aiohttp.ClientSession() as session:

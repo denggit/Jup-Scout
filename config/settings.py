@@ -62,7 +62,7 @@ class Settings:
     UNITS_PER_USDC = 1_000_000
 
     # 每次交易的USDC数量
-    AMOUNT_USDC = 10
+    AMOUNT_USDC = 100
 
     # --- ⚡️ 成本与风控配置 (你的核心要求) ---
     # 1. 假定 SOL 价格 (用于快速计算 Gas 和 小费成本)
@@ -74,7 +74,7 @@ class Settings:
 
     # 3. Jito 贿赂费 (起步给 0.0001 SOL, 约 $0.02 - $0.1)
     # 如果抢不到单，可以适当调高这个值 (比如 0.001)
-    JITO_TIP_AMOUNT_SOL = 0.0001
+    JITO_TIP_AMOUNT_SOL = 0.001
 
     # 4. 最低净利润要求 (USDC)
     # 只有当 (预期利润 - 交易成本 - 贿赂成本) > 这个值，才开火
