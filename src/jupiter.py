@@ -81,36 +81,39 @@ class JupiterClient:
 
     async def check_arb_opportunity(self, invest_amount_usdc_units):
         """
-        USDC -> SOL -> USDC 套利机会检查。
-        :param invest_amount_usdc_units: 投入 USDC（最小精度）
-        :return: 成功时返回 dict(quote_buy, quote_sell, intermediate_amount, final_usdc_units, gross_profit_usdc, net_profit_usdc)，失败返回 None
+        按 settings.ARB_PATH 做闭环套利机会检查（首尾须为 USDC）。
+        :param invest_amount_usdc_units: 投入 USDC 数量（最小精度）
+        :return: 成功时返回 dict(quotes, final_usdc_units, gross_profit_usdc, net_profit_usdc)，失败返回 None
         """
-        intermediate_mint = settings.SOL_MINT
+        path = list(settings.ARB_PATH)
+        if len(path) < 2 or path[0] != "USDC" or path[-1] != "USDC":
+            logger.error("ARB_PATH 首尾必须为 USDC")
+            return None
+
+        try:
+            mints = [settings.get_mint(s) for s in path]
+        except ValueError as e:
+            logger.error(str(e))
+            return None
+
+        path_str = " -> ".join(path)
         human_amount = invest_amount_usdc_units / settings.UNITS_PER_USDC
-        logger.info(f"🔎 开始巡逻: 投入 {human_amount} USDC, 路径: USDC -> SOL -> USDC")
+        logger.info(f"🔎 开始巡逻: 投入 {human_amount} USDC, 路径: {path_str}")
 
-        quote_buy = await self.get_quote(
-            settings.USDC_MINT,
-            intermediate_mint,
-            invest_amount_usdc_units
-        )
-        if not quote_buy:
-            logger.warning("第一腿询价失败")
-            return None
+        quotes = []
+        amount_in = invest_amount_usdc_units
+        for i in range(len(path) - 1):
+            input_mint = mints[i]
+            output_mint = mints[i + 1]
+            q = await self.get_quote(input_mint, output_mint, amount_in)
+            if not q:
+                logger.warning(f"第 {i + 1} 腿询价失败 ({path[i]} -> {path[i + 1]})")
+                return None
+            quotes.append(q)
+            amount_in = int(q["outAmount"])
+            logger.info(f"  --> 第 {i + 1} 步: 换得 {path[i + 1]} (raw amount: {amount_in})")
 
-        intermediate_amount = int(quote_buy['outAmount'])
-        logger.info(f"  --> 第一步: 换得 {intermediate_amount / settings.LAMPORT_PER_SOL:.4f} SOL")
-
-        quote_sell = await self.get_quote(
-            intermediate_mint,
-            settings.USDC_MINT,
-            intermediate_amount
-        )
-        if not quote_sell:
-            logger.warning("第二腿询价失败")
-            return None
-
-        final_usdc_units = int(quote_sell['outAmount'])
+        final_usdc_units = amount_in
         profit_units = final_usdc_units - invest_amount_usdc_units
         gross_profit_usdc = profit_units / settings.UNITS_PER_USDC
         total_cost_usdc = (
@@ -118,14 +121,12 @@ class JupiterClient:
         ) * settings.FIXED_SOL_PRICE_USDC
         net_profit_usdc = gross_profit_usdc - total_cost_usdc
 
-        logger.info(f"  --> 第二步: 变回 {final_usdc_units / settings.UNITS_PER_USDC:.4f} USDC")
+        logger.info(f"  --> 最终: {final_usdc_units / settings.UNITS_PER_USDC:.4f} USDC")
         logger.info(f"📊 毛利润: ${gross_profit_usdc:.4f} USDC, 净利润: ${net_profit_usdc:.4f} USDC")
 
         return {
-            'quote_buy': quote_buy,
-            'quote_sell': quote_sell,
-            'intermediate_amount': intermediate_amount,
-            'final_usdc_units': final_usdc_units,
-            'gross_profit_usdc': gross_profit_usdc,
-            'net_profit_usdc': net_profit_usdc,
+            "quotes": quotes,
+            "final_usdc_units": final_usdc_units,
+            "gross_profit_usdc": gross_profit_usdc,
+            "net_profit_usdc": net_profit_usdc,
         }

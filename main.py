@@ -54,6 +54,14 @@ async def main():
     logger.info(f"💵 每次投入: {amount_usdc} USDC")
     logger.info(f"🛑 最低净利要求: ${settings.MIN_NET_PROFIT_USDC}")
     logger.info(f"🛡️ 成本估算基准: SOL = ${settings.FIXED_SOL_PRICE_USDC}")
+    path_str = " -> ".join(settings.ARB_PATH)
+    logger.info(f"🛤️ 套利路径: {path_str}")
+    try:
+        for s in settings.ARB_PATH:
+            settings.get_mint(s)
+    except ValueError as e:
+        logger.error(f"❌ 路径代币配置错误: {e}")
+        return
     if settings.JUPITER_API_KEYS:
         logger.info(f"🔑 Jupiter API Key 池: {len(settings.JUPITER_API_KEYS)} 个")
     if len(settings.JITO_ENGINE_URLS) > 1:
@@ -69,7 +77,8 @@ async def main():
                 await asyncio.sleep(min(rate_limit_wait, 5))  # 每5秒检查一次，避免长时间阻塞
                 continue
 
-            logger.info("🔎 正在扫描闭环套利机会 (USDC -> SOL -> USDC)...")
+            path_str = " -> ".join(settings.ARB_PATH)
+            logger.info(f"🔎 正在扫描闭环套利机会 ({path_str})...")
 
             # 使用check_arb_opportunity方法检查套利机会
             arb_result = await jup_client.check_arb_opportunity(amount_lamports)
@@ -90,37 +99,28 @@ async def main():
             # 关键：只有净利润大于最低要求时才执行套利（确保不会亏损）
             if net_profit > settings.MIN_NET_PROFIT_USDC:
                 logger.warning(f"🔥 发现套利机会! 净利润: ${net_profit:.4f} USDC (毛利: ${gross_profit:.4f} USDC)")
-                
-                # 执行原子套利：构建包含两个swap的原子bundle
-                logger.info("📦 构建原子套利交易bundle (USDC->SOL->USDC)...")
-                
-                # 关键：为了确保原子性，我们需要快速连续获取两个swap交易
-                # 这样它们会使用相同或非常接近的blockhash
-                # 1. 获取第一个swap交易 (USDC -> SOL)
-                swap_buy_resp = await jup_client.get_swap_tx(arb_result['quote_buy'])
-                if not swap_buy_resp:
-                    logger.error("❌ 获取第一个swap交易失败 (USDC -> SOL)")
-                    await asyncio.sleep(3)
+
+                quotes = arb_result["quotes"]
+                logger.info(f"📦 构建原子套利交易 bundle ({path_str})...")
+
+                swap_txs = []
+                for idx, quote in enumerate(quotes):
+                    step_desc = f"{settings.ARB_PATH[idx]} -> {settings.ARB_PATH[idx + 1]}"
+                    swap_resp = await jup_client.get_swap_tx(quote)
+                    if not swap_resp:
+                        logger.error(f"❌ 获取第 {idx + 1} 腿 swap 交易失败 ({step_desc})")
+                        await asyncio.sleep(3)
+                        swap_txs = None
+                        break
+                    swap_txs.append(swap_resp["swapTransaction"])
+
+                if not swap_txs:
                     continue
 
-                # 2. 立即获取第二个swap交易 (SOL -> USDC)
-                # 注意：第二个swap使用第一个swap的输出数量，确保闭环
-                swap_sell_resp = await jup_client.get_swap_tx(arb_result['quote_sell'])
-                if not swap_sell_resp:
-                    logger.error("❌ 获取第二个swap交易失败 (SOL -> USDC)")
-                    await asyncio.sleep(3)
-                    continue
-
-                # 3. 将两个swap交易打包成原子bundle并发送
-                # 关键：两个swap在同一个bundle中，要么全部成功，要么全部失败
-                # Bundle执行顺序：swap1 (USDC->SOL) -> swap2 (SOL->USDC) -> tip
-                # Jito Bundle的原子性保证：如果任何一个swap失败，整个bundle都会回滚
-                logger.info("🔒 打包原子bundle，确保零风险套利...")
-                res = await jito_client.send_bundle(
-                    swap_buy_resp['swapTransaction'],  # 第一个swap
-                    settings.KEYPAIR,
-                    additional_txs=[swap_sell_resp['swapTransaction']]  # 第二个swap，确保原子执行
-                )
+                logger.info("🔒 打包原子 bundle，确保零风险套利...")
+                first_tx = swap_txs[0]
+                additional_txs = swap_txs[1:] if len(swap_txs) > 1 else None
+                res = await jito_client.send_bundle(first_tx, settings.KEYPAIR, additional_txs=additional_txs)
 
                 if res == "RATE_LIMITED":
                     cooldown = max(30, jito_client.get_rate_limit_wait_seconds())

@@ -33,8 +33,28 @@ class Settings:
         JUPITER_API_KEYS = [os.getenv("JUPITER_API_KEY").strip()]
 
     # --- 代币地址 (常量) ---
+    # 路径中出现的代币必须在 settings 中配置 XX_MINT，否则会报错
     SOL_MINT = "So11111111111111111111111111111111111111112"
     USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    # 示例：若路径含 BONK，则添加 BONK_MINT = "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263"
+
+    # --- 套利路径（首尾必须为 USDC，中间为代币符号）---
+    # 示例 .env: ARB_PATH=USDC,SOL,USDC  或  ARB_PATH=USDC,SOL,BONK,USDC
+    _arb_path_raw = os.getenv("ARB_PATH", "USDC,SOL,USDC")
+    ARB_PATH = [s.strip().upper() for s in _arb_path_raw.split(",") if s.strip()]
+    if not ARB_PATH or ARB_PATH[0] != "USDC" or ARB_PATH[-1] != "USDC":
+        ARB_PATH = ["USDC", "SOL", "USDC"]  # 默认
+
+    @staticmethod
+    def get_mint(symbol: str) -> str:
+        """根据路径中的代币符号取 mint 地址；路径中出现的代币必须在 settings 中配置 XX_MINT。"""
+        sym = (symbol or "").strip().upper()
+        if not sym:
+            raise ValueError("代币符号为空")
+        mint = getattr(Settings, f"{sym}_MINT", None)
+        if mint is None:
+            raise ValueError(f"未配置 {sym}_MINT，请在 config/settings.py 或 .env 中配置该代币的 mint 地址")
+        return mint
 
     # --- 精度换算 ---
     LAMPORT_PER_SOL = 1_000_000_000
