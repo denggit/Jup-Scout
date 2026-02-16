@@ -70,7 +70,7 @@ class Settings:
     FIXED_SOL_PRICE_USDC = 500.0
 
     # 2. 预估 Gas 费 (Solana 基础费是 0.000005，我们按 2 个签名算 0.00001)
-    ESTIMATED_GAS_SOL = 0.00001
+    ESTIMATED_GAS_SOL = 0.00002
 
     # 3. Jito 贿赂费 (起步给 0.0001 SOL, 约 $0.02 - $0.1)
     # 如果抢不到单，可以适当调高这个值 (比如 0.001)

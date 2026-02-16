@@ -13,7 +13,11 @@ import random
 import httpx
 from loguru import logger
 
+from solders.pubkey import Pubkey
+from solana.rpc.async_api import AsyncClient
+
 from config.settings import settings
+from src.ata_utils import ensure_atas_for_path, get_ata_address, ata_exists, ensure_ata_exists
 from src.jito_client import JitoClient
 from src.jupiter import JupiterClient
 
@@ -67,6 +71,16 @@ async def main():
     if len(settings.JITO_ENGINE_URLS) > 1:
         logger.info(f"🌐 Jito 端点池: {len(settings.JITO_ENGINE_URLS)} 个")
 
+    # Stage 0：账户准备，确保路径上所有 ATA 常驻（USDC、wSOL、中间 token）
+    logger.info("🛠️ Stage 0: 确保路径 ATA 存在...")
+    try:
+        path_mints = [Pubkey.from_string(settings.get_mint(s)) for s in settings.ARB_PATH]
+        async with AsyncClient(settings.RPC_URL) as rpc:
+            await ensure_atas_for_path(rpc, settings.KEYPAIR, path_mints)
+    except Exception as e:
+        logger.warning(f"⚠️ Stage 0 部分失败（可继续运行）: {e}")
+    logger.info("✅ Stage 0 完成")
+
     # --- 死循环：开始持续巡逻 ---
     while True:
         try:
@@ -117,15 +131,53 @@ async def main():
                 if not swap_txs:
                     continue
 
-                # 黄金规则：只接受 pure swap，含 create ATA / closeAccount 直接 reject
+                # Stage 1：Quote 层。含 closeAccount 直接 reject；含 create ATA 则检查是否已有 ATA → 有则重新 quote，无则先 ensure 再重新 quote
+                need_requote = False
                 for idx, tx_b64 in enumerate(swap_txs):
-                    if jup_client.swap_tx_has_ata_create_or_close(tx_b64):
-                        logger.warning(f"❌ 第 {idx + 1} 腿含 create ATA 或 closeAccount，reject 此机会（非 pure swap）")
+                    if not jup_client.swap_tx_has_ata_create_or_close(tx_b64):
+                        continue
+                    mints = jup_client.swap_tx_ata_create_mints(tx_b64)
+                    # closeAccount 无 mints，仍视为非 pure，直接 reject
+                    if not mints:
+                        logger.warning("🔄 Quote 含 closeAccount，reject（非 pure swap）")
                         swap_txs = None
                         break
-                if not swap_txs:
+                    logger.warning(f"🔄 第 {idx + 1} 腿含 create ATA（mints={[str(m) for m in mints]}），检查 ATA 并可能重新 quote")
+                    async with AsyncClient(settings.RPC_URL) as rpc:
+                        for m in mints:
+                            ata = get_ata_address(settings.PUB_KEY, m)
+                            if not await ata_exists(rpc, ata):
+                                await ensure_ata_exists(rpc, settings.KEYPAIR, m)
+                    need_requote = True
+                    break
+
+                if swap_txs is None:
                     await asyncio.sleep(random.uniform(2, 4))
                     continue
+
+                if need_requote:
+                    # 重新 quote 一次，再检查是否变为 pure swap
+                    arb_result2 = await jup_client.check_arb_opportunity(amount_lamports)
+                    if not arb_result2 or arb_result2["net_profit_usdc"] <= settings.MIN_NET_PROFIT_USDC:
+                        await asyncio.sleep(random.uniform(2, 4))
+                        continue
+                    swap_txs = []
+                    for quote in arb_result2["quotes"]:
+                        resp = await jup_client.get_swap_tx(quote)
+                        if not resp:
+                            swap_txs = None
+                            break
+                        swap_txs.append(resp["swapTransaction"])
+                    if not swap_txs:
+                        continue
+                    for idx, tx_b64 in enumerate(swap_txs):
+                        if jup_client.swap_tx_has_ata_create_or_close(tx_b64):
+                            logger.warning("❌ 重新 quote 后仍含 create ATA / closeAccount，跳过此机会")
+                            swap_txs = None
+                            break
+                    if not swap_txs:
+                        await asyncio.sleep(random.uniform(2, 4))
+                        continue
 
                 logger.info("🔒 打包原子 bundle，确保零风险套利...")
                 first_tx = swap_txs[0]

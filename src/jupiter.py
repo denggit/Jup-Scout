@@ -35,7 +35,7 @@ class JupiterClient:
     @staticmethod
     def swap_tx_has_ata_create_or_close(swap_tx_base64: str) -> bool:
         """
-        黄金规则：只接受 pure swap。若交易里含 createAssociatedTokenAccount 或 closeAccount，返回 True（应 reject）。
+        黄金规则：若交易里含 createAssociatedTokenAccount 或 closeAccount，返回 True。
         不解析 lookup table，只检查静态 account_keys 中的 program_id。
         """
         try:
@@ -51,17 +51,45 @@ class JupiterClient:
                     continue
                 program_id = static_keys[program_id_index]
                 if program_id == ATA_PROGRAM_ID:
-                    logger.warning("🔄 Quote 含 createAssociatedTokenAccount，reject（非 pure swap）")
                     return True
                 if program_id == TOKEN_PROGRAM_ID:
                     data = getattr(ci, "data", b"")
                     if len(data) > 0 and data[0] == TOKEN_CLOSE_ACCOUNT_DISCRIMINATOR:
-                        logger.warning("🔄 Quote 含 closeAccount，reject（非 pure swap）")
                         return True
             return False
         except Exception as e:
             logger.debug(f"swap_tx_has_ata_create_or_close 解析异常: {e}")
             return False
+
+    @staticmethod
+    def swap_tx_ata_create_mints(swap_tx_base64: str) -> list:
+        """
+        若 swap 里含 create ATA，返回被创建 ATA 对应的 mint 列表（仅用静态 keys，用于 Stage 1 检查）。
+        ATA 指令 accounts 顺序：payer, ata, owner, mint → 取 accounts[3] 为 mint。
+        """
+        out = []
+        try:
+            raw = base64.b64decode(swap_tx_base64)
+            tx = VersionedTransaction.from_bytes(raw)
+            msg = getattr(tx.message, "value", tx.message)
+            if not isinstance(msg, MessageV0):
+                return out
+            static_keys = msg.account_keys
+            for ci in msg.instructions:
+                program_id_index = getattr(ci, "program_id_index", 0)
+                if program_id_index >= len(static_keys):
+                    continue
+                if static_keys[program_id_index] != ATA_PROGRAM_ID:
+                    continue
+                accounts = getattr(ci, "accounts", b"")
+                if len(accounts) >= 4:
+                    idx = accounts[3]
+                    if idx < len(static_keys):
+                        out.append(static_keys[idx])
+            return out
+        except Exception as e:
+            logger.debug(f"swap_tx_ata_create_mints 解析异常: {e}")
+            return out
 
     async def get_quote(self, input_mint, output_mint, amount):
         params = {
