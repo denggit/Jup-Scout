@@ -69,7 +69,7 @@ async def main():
 
             if not arb_result:
                 # 未发现套利机会或询价失败，等待后继续（随机延迟避免规律请求）
-                await asyncio.sleep(random.uniform(2, 4))
+                await asyncio.sleep(random.uniform(3, 6))  # 增加间隔以减少限流
                 continue
 
             # 检查净利润是否满足最低要求
@@ -119,6 +119,10 @@ async def main():
                     cooldown = max(30, jito_client.get_rate_limit_wait_seconds())
                     logger.info(f"⏳ 触发限流，进入 {cooldown} 秒冷却期...")
                     await asyncio.sleep(cooldown)
+                elif res == "VOTE_ACCOUNT_LOCKED":
+                    logger.error("❌ 交易锁定vote accounts，跳过此套利机会")
+                    await asyncio.sleep(random.uniform(3, 5))  # 短暂延迟后继续扫描
+                    continue
                 elif res:
                     logger.success(f"🎉 原子套利Bundle已被Jito接受! Bundle ID: {res}")
                     logger.info("ℹ️ send_bundle 成功仅代表被接收，需等待真正上链确认")
@@ -151,18 +155,18 @@ async def main():
 
                     if not is_landed:
                         logger.warning(f"⚠️ Bundle 在轮询窗口内未确认上链，可能已过期/被丢弃。Bundle ID: {res}")
-                    await asyncio.sleep(random.uniform(3, 7))
+                    await asyncio.sleep(random.uniform(5, 10))  # 增加间隔以减少限流
                 else:
                     logger.error("❌ Bundle提交失败")
-                    await asyncio.sleep(random.uniform(3, 5))
+                    await asyncio.sleep(random.uniform(5, 10))  # 增加间隔以减少限流
             else:
                 # 利润不足，继续扫描（随机延迟避免规律请求）
                 logger.info(f"📉 利润不足，继续扫描... (净利润: ${net_profit:.4f} < ${settings.MIN_NET_PROFIT_USDC})")
-                await asyncio.sleep(random.uniform(4, 6))
+                await asyncio.sleep(random.uniform(5, 8))  # 增加间隔以减少限流
 
         except Exception as e:
             logger.error(f"主循环异常: {e}")
-            await asyncio.sleep(random.uniform(8, 12))
+            await asyncio.sleep(random.uniform(10, 15))  # 增加间隔以减少限流
 
 
 if __name__ == "__main__":

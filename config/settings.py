@@ -70,10 +70,8 @@ class Settings:
     # 默认端点池（如果未配置环境变量）
     if not JITO_ENGINE_URLS:
         JITO_ENGINE_URLS = [
-            "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
-            "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles",
-            "https://am.mainnet.block-engine.jito.wtf/api/v1/bundles",
-            "https://fr.mainnet.block-engine.jito.wtf/api/v1/bundles"
+            # "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
+            "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles"
         ]
     JITO_ENGINE_URL = JITO_ENGINE_URLS[0]  # 兼容旧代码
 

@@ -180,7 +180,7 @@ class JitoClient:
 
     def _set_engine_cooldown(self, engine_url, retry_after=None):
         """标记特定端点进入冷却"""
-        base_cooldown = 30  # 基础冷却30秒
+        base_cooldown = 45  # 基础冷却45秒（单端点环境需更保守）
         if retry_after:
             try:
                 base_cooldown = max(base_cooldown, int(float(retry_after)))
@@ -190,7 +190,7 @@ class JitoClient:
         current = self._engine_cooldown.get(engine_url, 0)
         now = time.time()
         if current > now:
-            base_cooldown = int((current - now) * 2)  # 翻倍
+            base_cooldown = int((current - now) * 2.5)  # 更激进的退避（2.5倍）
 
         self._engine_cooldown[engine_url] = now + base_cooldown
         return base_cooldown
@@ -208,7 +208,7 @@ class JitoClient:
             retry_after = int(float(retry_after_header)) if retry_after_header else 0
         except Exception:
             retry_after = 0
-        cooldown = max(30, retry_after)
+        cooldown = max(45, retry_after)  # 从30秒增加到45秒
         self._rate_limited_until = max(self._rate_limited_until, time.time() + cooldown)
         return cooldown
 

@@ -64,8 +64,21 @@ async def test_rpc_connection():
         async with AsyncClient(settings.RPC_URL) as client:
             version = await client.get_version()
             if version.value:
-                print(f"✅ RPC连接成功，版本: {version.value.get('solana-core', '未知')}")
+                # 尝试多种方式获取版本信息
+                version_info = version.value
+                version_str = "未知"
+                if hasattr(version_info, 'solana_core'):
+                    version_str = version_info.solana_core
+                elif hasattr(version_info, 'solana-core'):
+                    version_str = getattr(version_info, 'solana-core')
+                elif hasattr(version_info, '__dict__'):
+                    # 尝试从__dict__中获取
+                    version_str = str(version_info.__dict__)
+                print(f"✅ RPC连接成功，版本信息: {version_str}")
                 return True
+            else:
+                print("❌ RPC连接失败: 版本信息为空")
+                return False
     except Exception as e:
         print(f"❌ RPC连接失败: {e}")
         return False
