@@ -11,6 +11,7 @@ from solders.transaction import VersionedTransaction
 
 ATA_PROGRAM_ID = Pubkey.from_string("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")
 TOKEN_PROGRAM_ID = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+SYSTEM_PROGRAM_ID = Pubkey.from_string("11111111111111111111111111111111")
 
 
 def get_ata_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
@@ -21,7 +22,10 @@ def get_ata_address(owner: Pubkey, mint: Pubkey) -> Pubkey:
 
 
 def create_ata_instruction(payer: Pubkey, owner: Pubkey, mint: Pubkey) -> Instruction:
-    """创建一条 createAssociatedTokenAccount 指令（不包含 close）。"""
+    """
+    创建一条 createAssociatedTokenAccount 指令。
+    账户顺序：payer, ata, owner, mint, system_program, token_program, associated_token_program。
+    """
     ata = get_ata_address(owner, mint)
     return Instruction(
         program_id=ATA_PROGRAM_ID,
@@ -31,6 +35,9 @@ def create_ata_instruction(payer: Pubkey, owner: Pubkey, mint: Pubkey) -> Instru
             AccountMeta(ata, is_signer=False, is_writable=True),
             AccountMeta(owner, is_signer=False, is_writable=False),
             AccountMeta(mint, is_signer=False, is_writable=False),
+            AccountMeta(SYSTEM_PROGRAM_ID, is_signer=False, is_writable=False),
+            AccountMeta(TOKEN_PROGRAM_ID, is_signer=False, is_writable=False),
+            AccountMeta(ATA_PROGRAM_ID, is_signer=False, is_writable=False),
         ],
     )
 
