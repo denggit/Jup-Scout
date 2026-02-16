@@ -67,14 +67,14 @@ class Settings:
     # --- ⚡️ 成本与风控配置 (你的核心要求) ---
     # 1. 假定 SOL 价格 (用于快速计算 Gas 和 小费成本)
     # 设为 1000U 是一个保守策略：如果按 500U 算都能覆盖成本，实际肯定赚
-    FIXED_SOL_PRICE_USDC = 500.0
+    FIXED_SOL_PRICE_USDC = 100.0
 
     # 2. 预估 Gas 费 (Solana 基础费是 0.000005，我们按 2 个签名算 0.00001)
     ESTIMATED_GAS_SOL = 0.00002
 
     # 3. Jito 贿赂费 (起步给 0.0001 SOL, 约 $0.02 - $0.1)
     # 如果抢不到单，可以适当调高这个值 (比如 0.001)
-    JITO_TIP_AMOUNT_SOL = 0.001
+    JITO_TIP_AMOUNT_SOL = 0.0001
 
     # 4. 最低净利润要求 (USDC)
     # 只有当 (预期利润 - 交易成本 - 贿赂成本) > 这个值，才开火
@@ -93,8 +93,8 @@ class Settings:
         JITO_ENGINE_URLS = [
             "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles",  # 第一优先级：纽约（延迟最低）
             "https://mainnet.block-engine.jito.wtf/api/v1/bundles",  # 第二优先级：主节点
-            "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles",  # 第三优先级：法兰克福
-            "https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles"  # 第四优先级：东京（兜底）
+            # "https://frankfurt.mainnet.block-engine.jito.wtf/api/v1/bundles",  # 第三优先级：法兰克福
+            # "https://tokyo.mainnet.block-engine.jito.wtf/api/v1/bundles"  # 第四优先级：东京（兜底）
         ]
     JITO_ENGINE_URL = JITO_ENGINE_URLS[0]  # 兼容旧代码
 

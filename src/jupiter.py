@@ -191,7 +191,8 @@ class JupiterClient:
                 logger.warning(f"第 {i + 1} 腿询价失败 ({path[i]} -> {path[i + 1]})")
                 return None
             quotes.append(q)
-            amount_in = int(q["outAmount"])
+            # amount_in = int(q["outAmount"])
+            amount_in = int(q["otherAmountThreshold"])
             logger.info(f"  --> 第 {i + 1} 步: 换得 {path[i + 1]} (raw amount: {amount_in})")
 
         final_usdc_units = amount_in

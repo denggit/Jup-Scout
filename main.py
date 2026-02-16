@@ -231,7 +231,7 @@ async def main():
             else:
                 # 利润不足，继续扫描（随机延迟避免规律请求）
                 logger.info(f"📉 利润不足，继续扫描... (净利润: ${net_profit:.4f} < ${settings.MIN_NET_PROFIT_USDC})")
-                await asyncio.sleep(random.uniform(5, 12))  # 增加间隔以减少限流
+                await asyncio.sleep(random.uniform(10, 20))  # 增加间隔以减少限流
 
         except Exception as e:
             logger.error(f"主循环异常: {e}")
