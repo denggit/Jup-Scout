@@ -17,6 +17,9 @@ from solders.transaction import VersionedTransaction
 
 from config.settings import settings
 
+# System Program，用于显式构建 tip 指令确保 tip 账户 writable
+SYSTEM_PROGRAM_ID = Pubkey.from_string("11111111111111111111111111111111")
+
 # ALT 账户数据：前 56 字节为 meta，随后 4 字节为 address 数量 (u32 LE)，再 32*N 为地址
 _ALT_META_SIZE = 56
 
@@ -226,7 +229,7 @@ class JitoClient:
 
     def _set_engine_cooldown(self, engine_url, retry_after=None):
         """标记特定端点进入冷却"""
-        base_cooldown = 30
+        base_cooldown = 45
         if retry_after:
             try:
                 base_cooldown = max(base_cooldown, int(float(retry_after)))
@@ -261,7 +264,7 @@ class JitoClient:
             retry_after = int(float(retry_after_header)) if retry_after_header else 0
         except Exception:
             retry_after = 0
-        cooldown = max(30, retry_after)  # 30秒
+        cooldown = max(45, retry_after)  # 45秒
         self._rate_limited_until = max(self._rate_limited_until, time.time() + cooldown)
         return cooldown
 
@@ -346,12 +349,16 @@ class JitoClient:
             if tip_pubkey is None:
                 logger.error("❌ 无有效 Jito tip 账户 (JITO_TIP_ACCOUNTS 均无法解析为 Base58)")
                 return None
-            # 黄金规则：tip 独立一笔，仅 SystemProgram::Transfer，只 touch payer / tip account / system program
-            tip_ix = transfer(TransferParams(
-                from_pubkey=payer_keypair.pubkey(),
-                to_pubkey=tip_pubkey,
-                lamports=int(self.tip_amount * 10 ** 9)
-            ))
+            # 黄金规则：tip 独立一笔，仅 SystemProgram::Transfer；显式将 tip 账户标为 writable（Jito 要求 write-lock at least one tip account）
+            lamports = int(self.tip_amount * 10**9)
+            tip_ix = Instruction(
+                program_id=SYSTEM_PROGRAM_ID,
+                data=bytes([2, 0, 0, 0]) + lamports.to_bytes(8, "little"),  # Transfer = 2
+                accounts=[
+                    AccountMeta(payer_keypair.pubkey(), is_signer=True, is_writable=True),
+                    AccountMeta(tip_pubkey, is_signer=False, is_writable=True),
+                ],
+            )
             tip_msg = MessageV0.try_compile(payer_keypair.pubkey(), [tip_ix], [], recent_blockhash)
             signed_tip_tx = VersionedTransaction(tip_msg, [payer_keypair])
             # tip 必须是 bundle 最后一笔：[swap..., tip]
@@ -476,12 +483,18 @@ class JitoClient:
                     if "429" in err_str or "rate" in err_str:
                         got_rate_limited = True
                         continue
-                    # bundle 无效（vote、simulation failed 等）：打印每笔 tx 的 account keys 便于排查
-                    if "vote" in err_str or "lock" in err_str or "simulation" in err_str:
+                    # bundle 无效：区分 vote account 与 tip account（二者都含 "lock"）
+                    if "tip account" in err_str or "write lock at least one tip" in err_str:
+                        logger.warning("⚠️ Jito 要求 bundle 必须 write-lock 至少一个 tip 账户，检查 tip 交易是否将 tip 账户标为 writable")
                         for i, tx in enumerate(signed_txs):
                             msg = getattr(tx.message, "value", tx.message)
                             logger.error(f"❌ tx[{i}] accounts: {[str(a) for a in msg.account_keys]}")
-                        if "vote" in err_str or "lock" in err_str:
+                        return None
+                    if "vote" in err_str or ("lock" in err_str and "vote" in err_str) or "simulation" in err_str:
+                        for i, tx in enumerate(signed_txs):
+                            msg = getattr(tx.message, "value", tx.message)
+                            logger.error(f"❌ tx[{i}] accounts: {[str(a) for a in msg.account_keys]}")
+                        if "vote" in err_str or ("lock" in err_str and "vote" in err_str):
                             return "VOTE_ACCOUNT_LOCKED"
                         return None
                     continue
