@@ -8,6 +8,7 @@
 """
 import asyncio
 import time
+import random
 
 import httpx
 from loguru import logger
@@ -67,8 +68,8 @@ async def main():
             arb_result = await jup_client.check_arb_opportunity(amount_lamports)
 
             if not arb_result:
-                # 未发现套利机会或询价失败，等待后继续
-                await asyncio.sleep(3)
+                # 未发现套利机会或询价失败，等待后继续（随机延迟避免规律请求）
+                await asyncio.sleep(random.uniform(2, 4))
                 continue
 
             # 检查净利润是否满足最低要求
@@ -150,18 +151,18 @@ async def main():
 
                     if not is_landed:
                         logger.warning(f"⚠️ Bundle 在轮询窗口内未确认上链，可能已过期/被丢弃。Bundle ID: {res}")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(random.uniform(3, 7))
                 else:
                     logger.error("❌ Bundle提交失败")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(random.uniform(3, 5))
             else:
-                # 利润不足，继续扫描
+                # 利润不足，继续扫描（随机延迟避免规律请求）
                 logger.info(f"📉 利润不足，继续扫描... (净利润: ${net_profit:.4f} < ${settings.MIN_NET_PROFIT_USDC})")
-                await asyncio.sleep(5)
+                await asyncio.sleep(random.uniform(4, 6))
 
         except Exception as e:
             logger.error(f"主循环异常: {e}")
-            await asyncio.sleep(10)
+            await asyncio.sleep(random.uniform(8, 12))
 
 
 if __name__ == "__main__":

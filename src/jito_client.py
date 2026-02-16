@@ -31,6 +31,18 @@ def _parse_alt_addresses(data: bytes) -> list:
     return [Pubkey.from_bytes(data[start + i * 32 : start + (i + 1) * 32]) for i in range(n)]
 
 
+# Vote account 前缀（Jito 禁止锁定 vote accounts）
+_VOTE_ACCOUNT_PREFIXES = [
+    "Vote111111111111111111111111111111111111111",
+    "Vote111111111111111111111111111111111111112",
+]
+
+def _is_vote_account(pubkey: Pubkey) -> bool:
+    """检查是否为 vote account"""
+    key_str = str(pubkey)
+    return any(key_str.startswith(prefix) for prefix in _VOTE_ACCOUNT_PREFIXES)
+
+
 async def _fetch_alt_account(rpc_client: AsyncClient, lookup_table_pubkey: Pubkey) -> list:
     """从 RPC 拉取 ALT 账户并解析出 address 列表。"""
     try:
@@ -58,9 +70,17 @@ def _decompile_to_instructions(msg: MessageV0, full_account_keys: list) -> list:
         for i in accounts_bytes:
             if i >= len(full_account_keys):
                 continue
+            account_key = full_account_keys[i]
             is_signer = msg.is_signer(i) if hasattr(msg, "is_signer") else False
-            is_writable = msg.is_maybe_writable(i) if hasattr(msg, "is_maybe_writable") else True
-            account_metas.append(AccountMeta(full_account_keys[i], is_signer, is_writable))
+
+            # 关键修改：vote accounts强制设为readonly，默认writable=False更安全
+            if _is_vote_account(account_key):
+                is_writable = False
+                logger.debug(f"🔒 检测到vote account {account_key}，强制设为readonly")
+            else:
+                is_writable = msg.is_maybe_writable(i) if hasattr(msg, "is_maybe_writable") else False  # 默认False更安全
+
+            account_metas.append(AccountMeta(account_key, is_signer, is_writable))
         instructions.append(Instruction(program_id, data, account_metas))
     return instructions
 
@@ -139,11 +159,41 @@ class JitoClient:
         self.tip_amount = settings.JITO_TIP_AMOUNT_SOL
         self._rate_limited_until = 0.0
         self._bundle_engine_map = {}
+        self._engine_cooldown = {}  # 端点冷却时间记录 {url: 冷却结束时间戳}
         if JitoClient._url_iter is None:
             JitoClient._url_iter = itertools.cycle(settings.JITO_ENGINE_URLS)
 
     def _get_engine_url(self):
+        """获取可用端点，跳过冷却中的"""
+        now = time.time()
+        # 尝试所有端点，找到第一个不在冷却中的
+        for _ in range(len(settings.JITO_ENGINE_URLS)):
+            url = next(JitoClient._url_iter)
+            cooldown_until = self._engine_cooldown.get(url, 0)
+            if now >= cooldown_until:
+                return url
+        # 所有端点都在冷却，返回冷却时间最短的
+        if self._engine_cooldown:
+            return min(self._engine_cooldown.items(), key=lambda x: x[1])[0]
+        # 回退到简单轮询
         return next(JitoClient._url_iter)
+
+    def _set_engine_cooldown(self, engine_url, retry_after=None):
+        """标记特定端点进入冷却"""
+        base_cooldown = 30  # 基础冷却30秒
+        if retry_after:
+            try:
+                base_cooldown = max(base_cooldown, int(float(retry_after)))
+            except:
+                pass
+        # 指数退避：如果已冷却，延长冷却时间
+        current = self._engine_cooldown.get(engine_url, 0)
+        now = time.time()
+        if current > now:
+            base_cooldown = int((current - now) * 2)  # 翻倍
+
+        self._engine_cooldown[engine_url] = now + base_cooldown
+        return base_cooldown
 
     @staticmethod
     async def _post_json_rpc(engine_url: str, payload: dict, timeout: int = 10):
@@ -243,7 +293,18 @@ class JitoClient:
             # tip 必须是 bundle 最后一笔：[swap..., tip]。auction 顺序模拟时先执行 swap，tip 最后才能被正确计入 write-lock eligibility
             signed_txs.append(signed_tip_tx)
 
-            # 4. 安全序列化所有交易为Base58格式（Jito Bundle要求）
+            # 4.1 验证交易：确保没有 vote accounts 被锁定为 writable
+            for idx, signed_tx in enumerate(signed_txs):
+                msg = signed_tx.message
+                for i, key in enumerate(msg.account_keys):
+                    if _is_vote_account(key):
+                        is_writable = msg.is_maybe_writable(i) if hasattr(msg, "is_maybe_writable") else False
+                        if is_writable:
+                            logger.error(f"❌ 交易 {idx+1} 锁定 vote account {key} 为 writable，拒绝发送")
+                            return "VOTE_ACCOUNT_LOCKED"
+                logger.debug(f"✅ 交易 {idx+1} 验证通过，无 vote accounts 锁定")
+
+            # 4.2 安全序列化所有交易为Base58格式（Jito Bundle要求）
             try:
                 b58_txs = []
                 for idx, signed_tx in enumerate(signed_txs):
@@ -319,8 +380,12 @@ class JitoClient:
             engine_url = self._get_engine_url()
             status, data, headers = await self._post_json_rpc(engine_url, payload, timeout=15)
             if status == 429:
-                cooldown = self._set_rate_limit_cooldown(headers.get("Retry-After"))
-                logger.error(f"⚠️ Jito 触发全局限流 (429)，进入 {cooldown} 秒冷却")
+                # 标记特定端点冷却
+                endpoint_cooldown = self._set_engine_cooldown(engine_url, headers.get("Retry-After"))
+                logger.error(f"⚠️ Jito 端点 {engine_url} 触发限流，进入 {endpoint_cooldown} 秒冷却")
+                # 全局冷却作为后备
+                global_cooldown = self._set_rate_limit_cooldown(headers.get("Retry-After"))
+                logger.warning(f"⏳ 同时触发全局冷却 {global_cooldown} 秒")
                 return "RATE_LIMITED"
             if status != 200:
                 logger.error(f"❌ Jito 拒绝: {data.get('error') if isinstance(data, dict) else data}")
@@ -330,8 +395,10 @@ class JitoClient:
                 msg = err.get("message", err) if isinstance(err, dict) else str(err)
                 logger.error(f"❌ Jito JSON-RPC 错误: {msg}")
                 if "429" in str(msg).lower() or "rate" in str(msg).lower():
-                    cooldown = self._set_rate_limit_cooldown()
-                    logger.warning(f"⏳ 根据错误信息触发限流冷却 {cooldown} 秒")
+                    # 标记特定端点冷却
+                    endpoint_cooldown = self._set_engine_cooldown(engine_url, None)
+                    global_cooldown = self._set_rate_limit_cooldown()
+                    logger.warning(f"⏳ 根据错误信息触发限流冷却: 端点 {engine_url} 冷却 {endpoint_cooldown} 秒，全局冷却 {global_cooldown} 秒")
                     return "RATE_LIMITED"
                 return None
             bundle_id = data.get("result") if isinstance(data, dict) else None

@@ -64,10 +64,17 @@ class Settings:
     # JITO_ENGINE_URL = "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles"
 
     # Jito 引擎 URL 池（分号分隔，轮询使用以降低 429 概率）
-    # 示例 .env: JITO_ENGINE_URLS=https://mainnet.block-engine.jito.wtf/api/v1/bundles;https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles
-    JITO_ENGINE_URLS = ["https://mainnet.block-engine.jito.wtf/api/v1/bundles", "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles"]
+    # 示例 .env: JITO_ENGINE_URLS=https://mainnet.block-engine.jito.wtf/api/v1/bundles;https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles;https://am.mainnet.block-engine.jito.wtf/api/v1/bundles
+    _jito_urls_raw = os.getenv("JITO_ENGINE_URLS", "")
+    JITO_ENGINE_URLS = [u.strip() for u in _jito_urls_raw.split(";") if u.strip()]
+    # 默认端点池（如果未配置环境变量）
     if not JITO_ENGINE_URLS:
-        JITO_ENGINE_URLS = ["https://mainnet.block-engine.jito.wtf/api/v1/bundles"]
+        JITO_ENGINE_URLS = [
+            "https://mainnet.block-engine.jito.wtf/api/v1/bundles",
+            "https://ny.mainnet.block-engine.jito.wtf/api/v1/bundles",
+            "https://am.mainnet.block-engine.jito.wtf/api/v1/bundles",
+            "https://fr.mainnet.block-engine.jito.wtf/api/v1/bundles"
+        ]
     JITO_ENGINE_URL = JITO_ENGINE_URLS[0]  # 兼容旧代码
 
     # Jito 官方小费账户 (仅保留可解析为 Pubkey 的，避免 Invalid Base58)
